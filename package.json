@@ -1,0 +1,7 @@
+{
+  "name": "pi-kiosk-tools",
+  "type": "module",
+  "dependencies": {
+    "dbus-next": "^0.10.2"
+  }
+}
