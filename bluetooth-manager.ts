@@ -1322,6 +1322,8 @@ const indexHtml = `<!DOCTYPE html>
 </html>`;
 
 // Start the server
+const CORS = { "Access-Control-Allow-Origin": "*" };
+
 const server = serve({
   port: 3456,
   
@@ -1331,6 +1333,19 @@ const server = serve({
       headers: { "Content-Type": "text/html" },
     }),
     
+    // API: Diagnostics (lightweight status for dashboard)
+    "/api/diagnostics": {
+      async GET() {
+        const adapter = await getAdapterInfo();
+        const { devices } = await listDevices();
+        const connected = (devices || []).filter((d: any) => d.connected);
+        return Response.json({
+          powered: adapter.powered ?? false,
+          connectedDevices: connected.map((d: any) => ({ name: d.name, type: d.deviceType, battery: d.battery })),
+        }, { headers: CORS });
+      },
+    },
+
     // API: Get adapter info
     "/api/adapter": {
       async GET() {

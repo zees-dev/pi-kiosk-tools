@@ -1116,6 +1116,16 @@ async function main() {
         });
       }
 
+      if (url.pathname === "/api/diagnostics") {
+        const s = getFullState();
+        return new Response(JSON.stringify({
+          ps4Connected: s.ps4.connected,
+          ps4Host: s.ps4.host,
+          controllers: s.controllers.map((c: any) => c.name),
+          activePads: s.pads.filter((p: any) => p.active).length,
+        }), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } });
+      }
+
       if (url.pathname === "/api/status") {
         return new Response(JSON.stringify(getFullState()), { headers: { "Content-Type": "application/json" } });
       }

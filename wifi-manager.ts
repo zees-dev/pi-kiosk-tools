@@ -1142,6 +1142,8 @@ const indexHtml = `<!DOCTYPE html>
 // Server
 // ==========================================
 
+const CORS = { "Access-Control-Allow-Origin": "*" };
+
 const server = serve({
   port: PORT,
   hostname: "0.0.0.0",
@@ -1149,6 +1151,21 @@ const server = serve({
   routes: {
     "/": new Response(indexHtml, { headers: { "Content-Type": "text/html" } }),
 
+    "/api/diagnostics": {
+      GET() {
+        const s = getStatus();
+        if (s.error) return Response.json({ error: s.error }, { headers: CORS });
+        let connection: string;
+        if (s.activeInterface === "wifi" && s.wireless?.connection) connection = s.wireless.connection;
+        else if (s.activeInterface === "ethernet") connection = "Ethernet";
+        else connection = "No connection";
+        return Response.json({
+          radioEnabled: s.radioEnabled ?? false,
+          connection,
+          signal: s.wireless?.signal ?? null,
+        }, { headers: CORS });
+      },
+    },
     "/api/status": {
       GET() { return Response.json(getStatus()); },
     },
