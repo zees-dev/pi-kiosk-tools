@@ -186,7 +186,7 @@ function getSystemDiagnostics() {
   }
 
   // Services health
-  const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "kiosk-dashboard"];
+  const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "vnc", "kiosk-dashboard"];
   const services = serviceNames.map(name => {
     const active = run(`systemctl is-active ${name}.service 2>/dev/null`) === "active";
     const runtimeDisabled = existsSync(`/run/systemd/system/${name}.service.d/disable.conf`);
@@ -374,6 +374,7 @@ function getApps(): App[] {
     { id: "wifi", name: "WiFi Manager", icon: "📶", url: `http://${ip}:3457`, description: "Network settings", diagnosticsUrl: `http://${ip}:3457/api/diagnostics` },
     { id: "bluetooth", name: "Bluetooth", icon: "🔵", url: `http://${ip}:3456`, description: "Controller pairing", diagnosticsUrl: `http://${ip}:3456/api/diagnostics` },
     { id: "remotepad", name: "RemotePad", icon: "🎮", url: `http://${ip}:3458`, description: "PS4 controller bridge", diagnosticsUrl: `http://${ip}:3458/api/diagnostics` },
+    { id: "vnc", name: "VNC", icon: "📺", url: `http://${ip}:6080/vnc.html?host=${ip}&port=6080&autoconnect=true&resize=scale&quality=6&show_dot=true&view_clip=true`, description: "View kiosk display remotely", external: true },
   );
   return apps;
 }
@@ -689,6 +690,7 @@ const HTML = `<!DOCTYPE html>
   .av-custom-preview { font-size: 14px; color: #e0e0e0; font-variant-numeric: tabular-nums; font-weight: 500; }
   .av-reset-btn { background: #333; color: #aaa; border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500; cursor: pointer; -webkit-tap-highlight-color: transparent; }
   .av-reset-btn:active { background: #444; color: #fff; }
+
   .av-apply-btn { background: #4a9eff; color: #fff; border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; -webkit-tap-highlight-color: transparent; transition: opacity 0.15s; }
   .av-apply-btn:active { background: #3a8eef; }
   .av-apply-btn:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
@@ -737,6 +739,7 @@ const HTML = `<!DOCTYPE html>
   .app-card { display: flex; align-items: center; gap: 12px; background: #1a1a1a; border: 1px solid #282828; border-radius: 10px; padding: 12px 14px; cursor: pointer; transition: all 0.2s; }
   .app-card:hover { border-color: #444; background: #222; }
   .app-card:active { background: #252525; }
+  .app-card.disabled { opacity: 0.4; pointer-events: none; cursor: default; }
   .app-card.active { border-color: #4a9eff; background: #1a2a3a; }
   .app-card .icon { font-size: 28px; flex-shrink: 0; width: 36px; text-align: center; }
   .app-card .app-info { flex: 1; min-width: 0; }
@@ -826,6 +829,7 @@ const HTML = `<!DOCTYPE html>
   <div class="status-bar" id="statusBar"></div>
   <div class="remote-btn" id="remoteBtn">🖱️ Remote Input</div>
   <div class="remote-btn" id="avBtn">🔊 Display & Audio</div>
+
 
   <div class="section-title">Apps</div>
   <div class="app-grid" id="appGrid"></div>
@@ -1217,6 +1221,10 @@ function formatDiag(app, diag) {
     const ctrlStr = ctrls.length ? ctrls.join(', ') : '<span class="diag-off">No controllers</span>';
     return '<div class="diag"><div class="diag-line">' + ps4 + '</div><div class="diag-line">' + ctrlStr + '</div></div>';
   }
+  if (app.id === 'vnc') {
+    if (!diag.active) return '<div class="diag"><div class="diag-line diag-off">Service disabled</div></div>';
+    return '<div class="diag"><div class="diag-line diag-ok">Running</div><div class="diag-line">' + (diag.nativeAddr || '') + '</div></div>';
+  }
   return '';
 }
 
@@ -1226,12 +1234,17 @@ function renderApps(kioskUrl) {
     const card = document.createElement('div');
     const isActive = kioskUrl && app.url && kioskUrl.startsWith(app.url);
     const isMoonlightStop = app.action === 'stop-moonlight';
-    card.className = 'app-card' + (isActive ? ' active' : '') + (isMoonlightStop ? ' active' : '');
+    const isDisabled = app.external && diagCache[app.id] && !diagCache[app.id].active;
+    card.className = 'app-card' + (isActive ? ' active' : '') + (isMoonlightStop ? ' active' : '') + (isDisabled ? ' disabled' : '');
     const diagHtml = app.action ? '' : formatDiag(app, diagCache[app.id]);
-    const linkHtml = app.url ? '<a class="open-link" href="' + app.url + '" target="_blank" title="Open in browser">↗</a>' : '';
+    const linkHtml = (!isDisabled && app.url) ? '<a class="open-link" href="' + app.url + '" target="_blank" title="Open in browser">↗</a>' : '';
     card.innerHTML = '<div class="icon">' + app.icon + '</div><div class="app-info"><div class="name">' + app.name + '</div><div class="desc">' + app.description + '</div></div>' + diagHtml + linkHtml;
-    if (app.action) {
+    if (isDisabled) {
+      // no click handler
+    } else if (app.action) {
       card.onclick = () => handleMoonlightAction(app.action);
+    } else if (app.external) {
+      card.onclick = () => { window.open(app.url, '_blank'); };
     } else {
       card.onclick = (e) => { if (!e.target.closest('.open-link')) navigate(app.url, false); };
     }
@@ -1269,6 +1282,11 @@ async function loadDiagnostics() {
       diagCache[app.id] = await resp.json();
     } catch { diagCache[app.id] = null; }
   }
+  // VNC service status
+  try {
+    const resp = await fetch('/api/vnc', { signal: AbortSignal.timeout(3000) });
+    diagCache['vnc'] = await resp.json();
+  } catch { diagCache['vnc'] = null; }
   renderApps(currentUrl.textContent || '');
 }
 
@@ -1459,6 +1477,8 @@ $('riClose').onclick = () => {
 
 // ── Display & Audio modal ──
 $('avBtn').onclick = () => { $('avModal').classList.add('open'); loadAudioSettings(); };
+
+
 $('avClose').onclick = () => { $('avModal').classList.remove('open'); };
 $('avModal').onclick = (e) => { if (e.target === $('avModal')) $('avModal').classList.remove('open'); };
 
@@ -2430,13 +2450,16 @@ const server = serve({
 
     // API: service control
     if (path === "/api/services" && req.method === "GET") {
-      const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "kiosk-dashboard", "openclaw"];
+      const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "vnc", "kiosk-dashboard", "openclaw"];
+      // Services with wantedBy=[] (on-demand only) — toggle reflects active state
+      const onDemandServices = new Set(["vnc"]);
       const services = serviceNames.map(name => {
         const active = execSync(`systemctl is-active ${name}.service 2>/dev/null || true`, { timeout: 3000 }).toString().trim() === "active";
         // On NixOS, systemctl is-enabled always returns "enabled" for managed services.
         // Check for our runtime disable override instead.
         const runtimeDisabled = existsSync(`/run/systemd/system/${name}.service.d/disable.conf`);
-        return { name, active, enabled: !runtimeDisabled };
+        const enabled = onDemandServices.has(name) ? active : !runtimeDisabled;
+        return { name, active, enabled };
       });
       return Response.json(services);
     }
@@ -2448,6 +2471,27 @@ const server = serve({
         execSync(`/run/wrappers/bin/sudo systemctl stop ${body.name}.service`, { timeout: 10000 });
         return Response.json({ ok: true });
       } catch (e: any) { return Response.json({ ok: false, error: e.message }, { status: 500 }); }
+    }
+
+    if (path === "/api/vnc" && req.method === "GET") {
+      const active = (() => {
+        try { execSync("systemctl is-active vnc.service", { timeout: 3000 }); return true; } catch { return false; }
+      })();
+      let ip = "";
+      try {
+        const netInterfaces = require("os").networkInterfaces();
+        for (const iface of Object.values(netInterfaces)) {
+          for (const addr of (iface as any[])) {
+            if (addr.family === "IPv4" && !addr.internal) { ip = addr.address; break; }
+          }
+          if (ip) break;
+        }
+      } catch {}
+      return Response.json({
+        active, ip,
+        webUrl: active && ip ? `http://${ip}:6080/vnc.html?host=${ip}&port=6080&autoconnect=true` : null,
+        nativeAddr: active && ip ? `${ip}:5900` : null,
+      });
     }
 
     if (path === "/api/services/start" && req.method === "POST") {
