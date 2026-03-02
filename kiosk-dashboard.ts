@@ -9,7 +9,7 @@
  */
 
 import { serve, spawn } from "bun";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync } from "fs";
 import { execSync } from "child_process";
 
 // ── uinput Virtual Mouse (via C helper) ─────────────────────────────────────
@@ -624,6 +624,28 @@ const HTML = `<!DOCTYPE html>
   .ri-scroll { position: absolute; right: 0; top: 0; bottom: 0; width: 40px; background: rgba(255,255,255,0.02); border-left: 1px solid #1a1a1a; touch-action: none; }
   .ri-scroll::before { content: '⇕'; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #333; font-size: 16px; pointer-events: none; }
 
+  /* A/V Modal */
+  .av-group-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #555; font-weight: 600; margin-top: 12px; margin-bottom: 4px; }
+  .av-group-label:first-of-type { margin-top: 0; }
+  .av-section { padding: 12px 0; border-bottom: 1px solid #222; }
+  .av-section:last-child { border-bottom: none; }
+  .av-disabled { opacity: 0.4; pointer-events: none; }
+  .av-unsupported { font-size: 10px; color: #666; font-weight: 400; margin-left: 4px; }
+  .av-label { font-size: 13px; color: #aaa; margin-bottom: 8px; }
+  .av-row { display: flex; align-items: center; gap: 8px; }
+  .av-row-between { display: flex; align-items: center; justify-content: space-between; }
+  .av-slider { flex: 1; accent-color: #4a9eff; }
+  .ri-vol-btn { width: 32px; height: 32px; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; color: #aaa; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent; flex-shrink: 0; }
+  .ri-vol-btn:active { background: #2a2a2a; color: #fff; }
+  .av-vol-val { font-size: 13px; color: #4a9eff; min-width: 40px; text-align: right; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .ri-select { background: #0a0a0a; border: 1px solid #333; color: #e0e0e0; padding: 6px 10px; border-radius: 6px; font-size: 13px; }
+  .ri-toggle { position: relative; width: 40px; height: 22px; flex-shrink: 0; }
+  .ri-toggle input { opacity: 0; width: 0; height: 0; }
+  .ri-toggle-slider { position: absolute; inset: 0; background: #333; border-radius: 11px; cursor: pointer; transition: background 0.2s; }
+  .ri-toggle-slider::before { content: ''; position: absolute; width: 18px; height: 18px; left: 2px; top: 2px; background: #888; border-radius: 50%; transition: all 0.2s; }
+  .ri-toggle input:checked + .ri-toggle-slider { background: #2e7d32; }
+  .ri-toggle input:checked + .ri-toggle-slider::before { transform: translateX(18px); background: #4CAF50; }
+
   /* Bottom input bar (nav + keyboard + enter) */
   .ri-input-bar { display: flex; align-items: center; gap: 0; padding: 6px 8px; background: #111; border-top: 1px solid #222; flex-shrink: 0; }
   .ri-nav-btn { width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; background: none; border: 1px solid #333; color: #aaa; font-size: 15px; cursor: pointer; transition: all 0.1s; flex-shrink: 0; -webkit-tap-highlight-color: transparent; }
@@ -740,6 +762,7 @@ const HTML = `<!DOCTYPE html>
 
   <div class="status-bar" id="statusBar"></div>
   <div class="remote-btn" id="remoteBtn">🖱️ Remote Input</div>
+  <div class="remote-btn" id="avBtn">🔊 Display & Audio</div>
 
   <div class="section-title">Apps</div>
   <div class="app-grid" id="appGrid"></div>
@@ -765,6 +788,74 @@ const HTML = `<!DOCTYPE html>
     <div id="sysCards"></div>
     <div id="portsSection" style="margin-top:8px"></div>
     <div id="svcsSection" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="avModal">
+  <div class="modal">
+    <button class="modal-close" id="avClose">✕</button>
+    <h2>🔊 Display & Audio</h2>
+
+    <div class="av-group-label">Audio</div>
+    <div class="av-section">
+      <div class="av-label">Volume</div>
+      <div class="av-row">
+        <button class="ri-vol-btn" onclick="setVolume(-0.1)">−</button>
+        <input type="range" id="riVolSlider" min="0" max="150" value="100" class="av-slider">
+        <button class="ri-vol-btn" onclick="setVolume(+0.1)">+</button>
+        <span class="av-vol-val" id="riVolVal">100%</span>
+      </div>
+    </div>
+    <div class="av-section">
+      <div class="av-row-between">
+        <span class="av-label">Mute</span>
+        <label class="ri-toggle"><input type="checkbox" id="riMuteToggle" onchange="toggleMute()"><span class="ri-toggle-slider"></span></label>
+      </div>
+    </div>
+    <div class="av-section">
+      <div class="av-row-between">
+        <span class="av-label">Output</span>
+        <select id="avSinkSelect" onchange="setSink()" class="ri-select"></select>
+      </div>
+    </div>
+
+    <div class="av-group-label">Display</div>
+    <div class="av-section">
+      <div class="av-row-between">
+        <span class="av-label">Resolution</span>
+        <select id="riResSelect" onchange="setResolution()" class="ri-select"></select>
+      </div>
+    </div>
+    <div class="av-section">
+      <div class="av-row-between">
+        <span class="av-label">Refresh Rate</span>
+        <select id="avRefreshSelect" onchange="setRefreshRate()" class="ri-select"></select>
+      </div>
+    </div>
+    <div class="av-section">
+      <div class="av-row-between">
+        <span class="av-label">Rotation</span>
+        <select id="avRotSelect" onchange="setRotation()" class="ri-select">
+          <option value="normal">0° Normal</option>
+          <option value="90">90° Left</option>
+          <option value="180">180° Inverted</option>
+          <option value="270">270° Right</option>
+        </select>
+      </div>
+    </div>
+    <div class="av-section">
+      <div class="av-row-between">
+        <span class="av-label">Display Power</span>
+        <label class="ri-toggle"><input type="checkbox" id="riDisplayToggle" checked onchange="toggleDisplay()"><span class="ri-toggle-slider"></span></label>
+      </div>
+    </div>
+    <div class="av-section av-disabled" id="avBrightnessSection">
+      <div class="av-label">Brightness <span class="av-unsupported">Not supported (external HDMI)</span></div>
+      <div class="av-row">
+        <input type="range" id="avBrightnessSlider" min="0" max="100" value="100" class="av-slider" disabled>
+        <span class="av-vol-val" id="avBrightnessVal">—</span>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1270,6 +1361,154 @@ $('riClose').onclick = () => {
   $('riOverlay').classList.remove('open');
   if (riNavPoll) { clearInterval(riNavPoll); riNavPoll = null; }
 };
+
+// ── Display & Audio modal ──
+$('avBtn').onclick = () => { $('avModal').classList.add('open'); loadAudioSettings(); };
+$('avClose').onclick = () => { $('avModal').classList.remove('open'); };
+$('avModal').onclick = (e) => { if (e.target === $('avModal')) $('avModal').classList.remove('open'); };
+
+async function loadAudioSettings() {
+  try {
+    const resp = await fetch('/api/audio');
+    const data = await resp.json();
+    $('riVolSlider').value = data.volume;
+    $('riVolVal').textContent = data.volume + '%';
+    $('riMuteToggle').checked = data.muted;
+
+    // Audio output sinks
+    const sinkSel = $('avSinkSelect');
+    sinkSel.innerHTML = '';
+    if (data.sinks && data.sinks.length > 0) {
+      for (const sink of data.sinks) {
+        const opt = document.createElement('option');
+        opt.value = sink.id;
+        opt.textContent = sink.description;
+        if (sink.active) opt.selected = true;
+        sinkSel.appendChild(opt);
+      }
+    }
+  } catch {}
+  try {
+    const resp = await fetch('/api/display');
+    const data = await resp.json();
+    window._displayData = data;
+
+    // Resolutions
+    const sel = $('riResSelect');
+    sel.innerHTML = '';
+    for (const res of data.resolutions) {
+      const opt = document.createElement('option');
+      opt.value = res; opt.textContent = res;
+      if (res === data.currentRes) opt.selected = true;
+      sel.appendChild(opt);
+    }
+
+    // Refresh rates for current resolution
+    renderRefreshRates(data.currentRes, data.currentHz);
+
+    // Rotation
+    $('avRotSelect').value = data.currentTransform || 'normal';
+
+    // Brightness
+    if (data.brightnessSupported) {
+      $('avBrightnessSection').classList.remove('av-disabled');
+      $('avBrightnessSection').querySelector('.av-unsupported').style.display = 'none';
+      const slider = $('avBrightnessSlider');
+      slider.disabled = false;
+      slider.max = data.maxBrightness;
+      slider.value = data.brightness;
+      $('avBrightnessVal').textContent = Math.round(data.brightness / data.maxBrightness * 100) + '%';
+    }
+  } catch {}
+}
+
+$('riVolSlider').oninput = () => {
+  const vol = parseInt($('riVolSlider').value);
+  $('riVolVal').textContent = vol + '%';
+};
+$('riVolSlider').onchange = () => {
+  const vol = parseInt($('riVolSlider').value);
+  fetch('/api/audio/volume', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ volume: vol }) });
+};
+
+function setVolume(delta) {
+  const slider = $('riVolSlider');
+  const newVol = Math.max(0, Math.min(150, parseInt(slider.value) + Math.round(delta * 100)));
+  slider.value = newVol;
+  $('riVolVal').textContent = newVol + '%';
+  fetch('/api/audio/volume', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ volume: newVol }) });
+}
+
+function toggleMute() {
+  const muted = $('riMuteToggle').checked;
+  fetch('/api/audio/mute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ muted }) });
+}
+
+function setSink() {
+  const id = parseInt($('avSinkSelect').value);
+  fetch('/api/audio/sink', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) })
+    .then(r => r.json()).then(d => {
+      if (d.ok) showToast('Audio output changed');
+      else showToast('Failed', 'error');
+    });
+}
+
+function renderRefreshRates(res, currentHz) {
+  const sel = $('avRefreshSelect');
+  sel.innerHTML = '';
+  const data = window._displayData;
+  if (!data || !data.refreshMap || !data.refreshMap[res]) return;
+  data.refreshMap[res].forEach(hz => {
+    const opt = document.createElement('option');
+    opt.value = hz; opt.textContent = hz + ' Hz';
+    if (hz === (currentHz || data.currentHz)) opt.selected = true;
+    sel.appendChild(opt);
+  });
+}
+
+function setResolution() {
+  const res = $('riResSelect').value;
+  // Update refresh rate dropdown for new resolution
+  renderRefreshRates(res, null);
+  const hz = $('avRefreshSelect').value || undefined;
+  showToast('Changing resolution...');
+  fetch('/api/display/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ resolution: res, hz }) })
+    .then(r => r.json()).then(d => {
+      if (d.ok) { showToast('Resolution changed to ' + res); loadAudioSettings(); }
+      else showToast('Failed: ' + (d.error || 'unknown'), 'error');
+    });
+}
+
+function setRefreshRate() {
+  const res = $('riResSelect').value;
+  const hz = $('avRefreshSelect').value;
+  if (!hz) return;
+  showToast('Changing refresh rate...');
+  fetch('/api/display/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ resolution: res, hz }) })
+    .then(r => r.json()).then(d => {
+      if (d.ok) { showToast('Refresh rate changed to ' + hz + ' Hz'); loadAudioSettings(); }
+      else showToast('Failed: ' + (d.error || 'unknown'), 'error');
+    });
+}
+
+function setRotation() {
+  const transform = $('avRotSelect').value;
+  showToast('Changing rotation...');
+  fetch('/api/display/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transform }) })
+    .then(r => r.json()).then(d => {
+      if (d.ok) showToast('Rotation changed');
+      else showToast('Failed: ' + (d.error || 'unknown'), 'error');
+    });
+}
+
+function toggleDisplay() {
+  const on = $('riDisplayToggle').checked;
+  fetch('/api/display/power', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on }) })
+    .then(r => r.json()).then(d => {
+      if (d.ok) showToast(on ? 'Display on' : 'Display off');
+      else showToast('Failed: ' + (d.error || 'unknown'), 'error');
+    });
+}
 
 // Navigation back/forward
 async function updateNavState() {
@@ -1977,6 +2216,161 @@ const server = serve({
         }
         return Response.json({ ok: true });
       } catch (e: any) { return Response.json({ ok: false, error: e.message }, { status: 500 }); }
+    }
+
+    // API: audio/display settings
+    const WPCTL = "/run/current-system/sw/bin/wpctl";
+    const SUDO = "/run/wrappers/bin/sudo";
+    const KIOSK_ENV = { XDG_RUNTIME_DIR: "/run/user/1001" };
+    const wpctl = (args: string) => {
+      try {
+        return execSync(`${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 ${WPCTL} ${args}`, { timeout: 3000, encoding: "utf-8" }).trim();
+      } catch { return ""; }
+    };
+
+    if (path === "/api/audio" && req.method === "GET") {
+      const volRaw = wpctl("get-volume @DEFAULT_AUDIO_SINK@");
+      const match = volRaw.match(/Volume:\s*([\d.]+)/);
+      const volume = match ? parseFloat(match[1]) : 1.0;
+      const muted = volRaw.includes("[MUTED]");
+
+      // List audio sinks
+      let sinks: { id: number; name: string; description: string; active: boolean }[] = [];
+      try {
+        const dumpRaw = execSync(
+          `${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 /run/current-system/sw/bin/pw-dump 2>/dev/null`,
+          { timeout: 5000, encoding: "utf-8" }
+        );
+        const objs = JSON.parse(dumpRaw);
+        const defaultRaw = wpctl("inspect @DEFAULT_AUDIO_SINK@");
+        const defaultName = defaultRaw.match(/node\.name = "([^"]+)"/)?.[1] || "";
+        sinks = objs
+          .filter((o: any) => o.info?.props?.["media.class"] === "Audio/Sink")
+          .map((o: any) => ({
+            id: o.id,
+            name: o.info.props["node.name"],
+            description: o.info.props["node.description"] || o.info.props["node.nick"] || o.info.props["node.name"],
+            active: o.info.props["node.name"] === defaultName,
+          }));
+      } catch {}
+
+      return Response.json({ volume: Math.round(volume * 100), muted, sinks });
+    }
+
+    if (path === "/api/audio/volume" && req.method === "POST") {
+      const body = await req.json() as { volume: number };
+      const vol = Math.max(0, Math.min(150, body.volume)) / 100;
+      wpctl(`set-volume @DEFAULT_AUDIO_SINK@ ${vol.toFixed(2)}`);
+      return Response.json({ ok: true, volume: Math.round(vol * 100) });
+    }
+
+    if (path === "/api/audio/mute" && req.method === "POST") {
+      const body = await req.json() as { muted: boolean };
+      wpctl(`set-mute @DEFAULT_AUDIO_SINK@ ${body.muted ? "1" : "0"}`);
+      return Response.json({ ok: true, muted: body.muted });
+    }
+
+    if (path === "/api/audio/sink" && req.method === "POST") {
+      const body = await req.json() as { id: number };
+      wpctl(`set-default ${body.id}`);
+      return Response.json({ ok: true });
+    }
+
+    if (path === "/api/display" && req.method === "GET") {
+      const wlrRandr = () => {
+        try {
+          return execSync(
+            `${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 /run/current-system/sw/bin/wlr-randr`,
+            { timeout: 3000, encoding: "utf-8" }
+          ).trim();
+        } catch { return ""; }
+      };
+
+      const raw = wlrRandr();
+      const connected = raw.includes("Enabled: yes");
+      let currentRes = "";
+      let currentHz = "";
+      let currentTransform = "normal";
+
+      // Parse current mode
+      const currentMatch = raw.match(/(\d+x\d+) px, ([\d.]+) Hz \(.*current/);
+      if (currentMatch) { currentRes = currentMatch[1]; currentHz = currentMatch[2]; }
+
+      // Parse transform
+      const transformMatch = raw.match(/Transform:\s*(\S+)/);
+      if (transformMatch) currentTransform = transformMatch[1];
+
+      // Parse all modes: { res, hz } grouped and deduplicated
+      const modeLines = raw.matchAll(/(\d+x\d+) px, ([\d.]+) Hz/g);
+      const modeMap: Record<string, Set<string>> = {};
+      for (const m of modeLines) {
+        const res = m[1], hz = parseFloat(m[2]).toFixed(0);
+        if (!modeMap[res]) modeMap[res] = new Set();
+        modeMap[res].add(hz);
+      }
+
+      // Sort resolutions by pixel count descending
+      const resolutions = Object.keys(modeMap).sort((a, b) => {
+        const pa = a.split("x").map(Number); const pb = b.split("x").map(Number);
+        return (pb[0] * pb[1]) - (pa[0] * pa[1]);
+      });
+
+      // All refresh rates per resolution
+      const refreshMap: Record<string, string[]> = {};
+      for (const res of resolutions) {
+        refreshMap[res] = [...modeMap[res]].sort((a, b) => parseFloat(b) - parseFloat(a));
+      }
+
+      // Brightness: check for backlight interface
+      const read = (p: string) => { try { return readFileSync(p, "utf-8").trim(); } catch { return ""; } };
+      let brightnessSupported = false;
+      let brightness = -1, maxBrightness = -1;
+      if (existsSync("/sys/class/backlight")) {
+        const blDirs = readdirSync("/sys/class/backlight");
+        if (blDirs.length > 0) {
+          brightness = parseInt(read(`/sys/class/backlight/${blDirs[0]}/brightness`) || "-1");
+          maxBrightness = parseInt(read(`/sys/class/backlight/${blDirs[0]}/max_brightness`) || "-1");
+          brightnessSupported = brightness >= 0 && maxBrightness > 0;
+        }
+      }
+
+      return Response.json({
+        connected, resolutions, currentRes, refreshMap,
+        currentHz: currentHz ? parseFloat(currentHz).toFixed(0) : "",
+        currentTransform, brightnessSupported, brightness, maxBrightness,
+      });
+    }
+
+    // API: set display mode (resolution + optional refresh rate)
+    if (path === "/api/display/mode" && req.method === "POST") {
+      const body = await req.json() as { resolution?: string; hz?: string; transform?: string };
+      const args: string[] = [];
+      if (body.resolution) args.push("--mode", body.hz ? `${body.resolution}@${body.hz}Hz` : body.resolution);
+      if (body.transform) args.push("--transform", body.transform);
+      if (args.length === 0) return Response.json({ ok: false, error: "No changes" }, { status: 400 });
+      try {
+        execSync(
+          `${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 /run/current-system/sw/bin/wlr-randr --output HDMI-A-1 ${args.join(" ")}`,
+          { timeout: 5000 }
+        );
+        return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    if (path === "/api/display/power" && req.method === "POST") {
+      const body = await req.json() as { on: boolean };
+      try {
+        const flag = body.on ? "--on" : "--off";
+        execSync(
+          `${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 /run/current-system/sw/bin/wlr-randr --output HDMI-A-1 ${flag}`,
+          { timeout: 5000 }
+        );
+        return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
     }
 
     // API: reboot system
