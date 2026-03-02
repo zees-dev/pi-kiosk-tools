@@ -669,10 +669,29 @@ const HTML = `<!DOCTYPE html>
   .ri-scroll::before { content: '⇕'; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #333; font-size: 16px; pointer-events: none; }
 
   /* A/V Modal */
-  .av-group-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #555; font-weight: 600; margin-top: 12px; margin-bottom: 4px; }
-  .av-group-label:first-of-type { margin-top: 0; }
+  .av-group-label { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #666; font-weight: 600; margin-top: 28px; margin-bottom: 10px; }
+  .av-group-label:first-of-type { margin-top: 8px; }
   .av-section { padding: 12px 0; border-bottom: 1px solid #222; }
   .av-section:last-child { border-bottom: none; }
+  .av-canvas-wrap { margin-top: 8px; }
+  .av-canvas { position: relative; width: 100%; height: 180px; background: #0a0a0a; border: 1px solid #333; border-radius: 8px; touch-action: none; overflow: hidden; cursor: crosshair; }
+  .av-canvas-dot { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: #333; transform: translate(-50%, -50%); pointer-events: none; transition: background 0.15s; }
+  .av-canvas-dot.active { background: #4a9eff; }
+  .av-canvas-dot-label { position: absolute; font-size: 8px; color: #444; transform: translate(-50%, 6px); pointer-events: none; white-space: nowrap; }
+  .av-cursor { position: absolute; width: 18px; height: 18px; border-radius: 50%; background: #4a9eff; border: 2px solid #fff; transform: translate(-50%, -50%); pointer-events: none; z-index: 3; box-shadow: 0 0 8px rgba(74,158,255,0.5); transition: left 0.1s, top 0.1s; }
+  .av-crosshair-x { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(74,158,255,0.2); pointer-events: none; z-index: 1; transition: left 0.1s; }
+  .av-crosshair-y { position: absolute; left: 0; right: 0; height: 1px; background: rgba(74,158,255,0.2); pointer-events: none; z-index: 1; transition: top 0.1s; }
+  .av-canvas-labels { display: flex; justify-content: space-between; margin-top: 2px; }
+  .av-axis-label { font-size: 9px; color: #444; }
+  .av-slider-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .av-slider-label { font-size: 11px; color: #666; font-weight: 600; width: 16px; text-align: right; flex-shrink: 0; }
+  .av-slider-val { font-size: 13px; color: #4a9eff; min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
+  .av-custom-preview { font-size: 14px; color: #e0e0e0; font-variant-numeric: tabular-nums; font-weight: 500; }
+  .av-reset-btn { background: #333; color: #aaa; border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .av-reset-btn:active { background: #444; color: #fff; }
+  .av-apply-btn { background: #4a9eff; color: #fff; border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; -webkit-tap-highlight-color: transparent; transition: opacity 0.15s; }
+  .av-apply-btn:active { background: #3a8eef; }
+  .av-apply-btn:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
   .av-disabled { opacity: 0.4; pointer-events: none; }
   .av-unsupported { font-size: 10px; color: #666; font-weight: 400; margin-left: 4px; }
   .av-label { font-size: 13px; color: #aaa; margin-bottom: 8px; }
@@ -886,6 +905,38 @@ const HTML = `<!DOCTYPE html>
           <option value="270">270° Right</option>
         </select>
       </div>
+    </div>
+    <div class="av-section">
+      <div class="av-label">Custom Output Size <span style="font-size:10px;color:#666">(overscan fix)</span></div>
+      <div class="av-canvas-wrap">
+        <div class="av-canvas" id="avCanvas">
+          <div class="av-crosshair-x" id="avCrossX"></div>
+          <div class="av-crosshair-y" id="avCrossY"></div>
+          <div class="av-cursor" id="avCursor"></div>
+        </div>
+        <div class="av-canvas-labels">
+          <span class="av-axis-label" style="left:0">W →</span>
+          <span class="av-axis-label" style="right:0">H ↑</span>
+        </div>
+      </div>
+      <div class="av-slider-row">
+        <span class="av-slider-label">W</span>
+        <input type="range" id="avCustomWSlider" class="av-slider" min="0" max="1" value="0" oninput="onSliderChange()">
+        <span class="av-slider-val" id="avCustomWVal">—</span>
+      </div>
+      <div class="av-slider-row">
+        <span class="av-slider-label">H</span>
+        <input type="range" id="avCustomHSlider" class="av-slider" min="0" max="1" value="0" oninput="onSliderChange()">
+        <span class="av-slider-val" id="avCustomHVal">—</span>
+      </div>
+      <div class="av-row" style="justify-content:space-between;margin-top:8px">
+        <span class="av-custom-preview" id="avCustomPreview">—</span>
+        <div style="display:flex;gap:6px">
+          <button class="av-reset-btn" onclick="resetToDefault()">Reset</button>
+          <button class="av-apply-btn" id="avApplyBtn" onclick="applyCustomMode()" disabled>Apply</button>
+        </div>
+      </div>
+      <div style="font-size:10px;color:#555;margin-top:4px">Drag canvas or sliders — snaps to supported modes</div>
     </div>
     <div class="av-section">
       <div class="av-row-between">
@@ -1465,6 +1516,32 @@ async function loadAudioSettings() {
     // Rotation
     $('avRotSelect').value = data.currentTransform || 'normal';
 
+    // Custom output size — 2D canvas with resolution breakpoints
+    const resPoints = data.resolutions.map(r => {
+      const [w, h] = r.replace('i','').split('x').map(Number);
+      return { w, h, label: r };
+    });
+    window._resPoints = resPoints;
+    window._preferredRes = data.preferredRes || '';
+    const allW = resPoints.map(p => p.w);
+    const allH = resPoints.map(p => p.h);
+    window._minW = Math.min(...allW); window._maxW = Math.max(...allW);
+    window._minH = Math.min(...allH); window._maxH = Math.max(...allH);
+
+    // Build slider breakpoints (sorted unique widths/heights)
+    window._wBreaks = [...new Set(allW)].sort((a, b) => a - b);
+    window._hBreaks = [...new Set(allH)].sort((a, b) => a - b);
+    $('avCustomWSlider').min = 0; $('avCustomWSlider').max = window._wBreaks.length - 1;
+    $('avCustomHSlider').min = 0; $('avCustomHSlider').max = window._hBreaks.length - 1;
+
+    buildCanvasDots();
+    // Set cursor to current resolution
+    if (data.currentRes) {
+      const [cw, ch] = data.currentRes.split('x').map(Number);
+      window._activeRes = { w: cw, h: ch };
+      selectRes(cw, ch, 'init');
+    }
+
     // Brightness
     if (data.brightnessSupported) {
       $('avBrightnessSection').classList.remove('av-disabled');
@@ -1543,6 +1620,137 @@ function setRefreshRate() {
   fetch('/api/display/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ resolution: res, hz }) })
     .then(r => r.json()).then(d => {
       if (d.ok) { showToast('Refresh rate changed to ' + hz + ' Hz'); loadAudioSettings(); }
+      else showToast('Failed: ' + (d.error || 'unknown'), 'error');
+    });
+}
+
+function closestIdx(arr, val) {
+  let best = 0, bestDist = Infinity;
+  for (let i = 0; i < arr.length; i++) {
+    const d = Math.abs(arr[i] - val);
+    if (d < bestDist) { bestDist = d; best = i; }
+  }
+  return best;
+}
+
+function buildCanvasDots() {
+  const canvas = $('avCanvas');
+  canvas.querySelectorAll('.av-canvas-dot,.av-canvas-dot-label').forEach(el => el.remove());
+  const pts = window._resPoints || [];
+  const pad = 16;
+  pts.forEach(p => {
+    const x = pad + ((p.w - window._minW) / (window._maxW - window._minW)) * (canvas.offsetWidth - pad * 2);
+    const y = (canvas.offsetHeight - pad) - ((p.h - window._minH) / (window._maxH - window._minH)) * (canvas.offsetHeight - pad * 2);
+    const dot = document.createElement('div');
+    dot.className = 'av-canvas-dot';
+    dot.dataset.w = p.w; dot.dataset.h = p.h;
+    dot.style.left = x + 'px'; dot.style.top = y + 'px';
+    canvas.appendChild(dot);
+    const lbl = document.createElement('div');
+    lbl.className = 'av-canvas-dot-label';
+    lbl.textContent = p.w + '×' + p.h;
+    lbl.style.left = x + 'px'; lbl.style.top = y + 'px';
+    canvas.appendChild(lbl);
+  });
+}
+
+// Central sync: updates canvas cursor, sliders, and preview
+function selectRes(w, h, source) {
+  window._selectedRes = { w, h };
+  const canvas = $('avCanvas');
+  const pad = 16;
+  const x = pad + ((w - window._minW) / (window._maxW - window._minW)) * (canvas.offsetWidth - pad * 2);
+  const y = (canvas.offsetHeight - pad) - ((h - window._minH) / (window._maxH - window._minH)) * (canvas.offsetHeight - pad * 2);
+  $('avCursor').style.left = x + 'px'; $('avCursor').style.top = y + 'px';
+  $('avCrossX').style.left = x + 'px'; $('avCrossY').style.top = y + 'px';
+  canvas.querySelectorAll('.av-canvas-dot').forEach(d => {
+    d.classList.toggle('active', parseInt(d.dataset.w) === w && parseInt(d.dataset.h) === h);
+  });
+  // Sync sliders (skip if sliders triggered this)
+  if (source !== 'slider') {
+    $('avCustomWSlider').value = closestIdx(window._wBreaks, w);
+    $('avCustomHSlider').value = closestIdx(window._hBreaks, h);
+  }
+  $('avCustomWVal').textContent = w;
+  $('avCustomHVal').textContent = h;
+  $('avCustomPreview').textContent = w + ' × ' + h;
+  // Enable Apply only if different from active
+  const a = window._activeRes;
+  $('avApplyBtn').disabled = !!(a && a.w === w && a.h === h);
+}
+
+// Slider → find nearest resolution point with matching W and closest H (and vice versa)
+function onSliderChange() {
+  const w = window._wBreaks[parseInt($('avCustomWSlider').value)];
+  const h = window._hBreaks[parseInt($('avCustomHSlider').value)];
+  // Snap to nearest resolution point
+  let best = window._resPoints[0], bestDist = Infinity;
+  const wRange = window._maxW - window._minW || 1;
+  const hRange = window._maxH - window._minH || 1;
+  for (const p of window._resPoints) {
+    const dw = (p.w - w) / wRange;
+    const dh = (p.h - h) / hRange;
+    const dist = dw * dw + dh * dh;
+    if (dist < bestDist) { bestDist = dist; best = p; }
+  }
+  selectRes(best.w, best.h, 'slider');
+}
+
+// Canvas drag → snap to nearest resolution point
+function snapToNearest(clientX, clientY) {
+  const canvas = $('avCanvas');
+  const rect = canvas.getBoundingClientRect();
+  const pad = 16;
+  const px = clientX - rect.left;
+  const py = clientY - rect.top;
+  const rawW = window._minW + ((px - pad) / (rect.width - pad * 2)) * (window._maxW - window._minW);
+  const rawH = window._minH + (((rect.height - pad) - py) / (rect.height - pad * 2)) * (window._maxH - window._minH);
+  let best = window._resPoints[0], bestDist = Infinity;
+  const wRange = window._maxW - window._minW || 1;
+  const hRange = window._maxH - window._minH || 1;
+  for (const p of window._resPoints) {
+    const dw = (p.w - rawW) / wRange;
+    const dh = (p.h - rawH) / hRange;
+    const dist = dw * dw + dh * dh;
+    if (dist < bestDist) { bestDist = dist; best = p; }
+  }
+  selectRes(best.w, best.h, 'canvas');
+}
+
+(function() {
+  const canvas = $('avCanvas');
+  let dragging = false;
+  const onStart = (e) => { dragging = true; const t = e.touches ? e.touches[0] : e; snapToNearest(t.clientX, t.clientY); };
+  const onMove = (e) => { if (!dragging) return; e.preventDefault(); const t = e.touches ? e.touches[0] : e; snapToNearest(t.clientX, t.clientY); };
+  const onEnd = () => { dragging = false; };
+  canvas.addEventListener('mousedown', onStart);
+  canvas.addEventListener('mousemove', onMove);
+  canvas.addEventListener('mouseup', onEnd);
+  canvas.addEventListener('mouseleave', onEnd);
+  canvas.addEventListener('touchstart', onStart, { passive: false });
+  canvas.addEventListener('touchmove', onMove, { passive: false });
+  canvas.addEventListener('touchend', onEnd);
+})();
+
+function resetToDefault() {
+  const pref = window._preferredRes;
+  if (!pref) { showToast('No preferred mode found', 'error'); return; }
+  showToast('Resetting to ' + pref + '...');
+  const [w, h] = pref.split('x').map(Number);
+  fetch('/api/display/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ resolution: pref, hz: window._displayData?.preferredHz || '60' }) })
+    .then(r => r.json()).then(d => {
+      if (d.ok) { showToast('Reset to ' + pref); loadAudioSettings(); }
+      else showToast('Failed: ' + (d.error || 'unknown'), 'error');
+    });
+}
+
+function applyCustomMode() {
+  const sel = window._selectedRes;
+  if (!sel) { showToast('Select a resolution first', 'error'); return; }
+  showToast('Applying ' + sel.w + '×' + sel.h + '...');
+  fetch('/api/display/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ custom: true, width: sel.w, height: sel.h, hz: '60' }) })
+    .then(r => r.json()).then(d => {
+      if (d.ok) { showToast('Output set to ' + sel.w + '×' + sel.h); loadAudioSettings(); }
       else showToast('Failed: ' + (d.error || 'unknown'), 'error');
     });
 }
@@ -2362,6 +2570,12 @@ const server = serve({
       const currentMatch = raw.match(/(\d+x\d+) px, ([\d.]+) Hz \(.*current/);
       if (currentMatch) { currentRes = currentMatch[1]; currentHz = currentMatch[2]; }
 
+      // Parse preferred mode
+      let preferredRes = "";
+      let preferredHz = "";
+      const prefMatch = raw.match(/(\d+x\d+) px, ([\d.]+) Hz \(preferred/);
+      if (prefMatch) { preferredRes = prefMatch[1]; preferredHz = parseFloat(prefMatch[2]).toFixed(0); }
+
       // Parse transform
       const transformMatch = raw.match(/Transform:\s*(\S+)/);
       if (transformMatch) currentTransform = transformMatch[1];
@@ -2403,15 +2617,21 @@ const server = serve({
       return Response.json({
         connected, resolutions, currentRes, refreshMap,
         currentHz: currentHz ? parseFloat(currentHz).toFixed(0) : "",
+        preferredRes, preferredHz,
         currentTransform, brightnessSupported, brightness, maxBrightness,
       });
     }
 
-    // API: set display mode (resolution + optional refresh rate)
+    // API: set display mode (resolution + optional refresh rate, or custom mode)
     if (path === "/api/display/mode" && req.method === "POST") {
-      const body = await req.json() as { resolution?: string; hz?: string; transform?: string };
+      const body = await req.json() as { resolution?: string; hz?: string; transform?: string; custom?: boolean; width?: number; height?: number };
       const args: string[] = [];
-      if (body.resolution) args.push("--mode", body.hz ? `${body.resolution}@${body.hz}Hz` : body.resolution);
+      if (body.custom && body.width && body.height) {
+        const hz = body.hz || "60";
+        args.push("--custom-mode", `${body.width}x${body.height}@${hz}Hz`);
+      } else if (body.resolution) {
+        args.push("--mode", body.hz ? `${body.resolution}@${body.hz}Hz` : body.resolution);
+      }
       if (body.transform) args.push("--transform", body.transform);
       if (args.length === 0) return Response.json({ ok: false, error: "No changes" }, { status: 400 });
       try {
