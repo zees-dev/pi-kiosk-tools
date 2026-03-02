@@ -501,6 +501,50 @@ async function cdpDispatchKey(keyName: string) {
   await cdpSend(ws, "Input.dispatchKeyEvent", { type: "keyUp", ...base });
 }
 
+// ── Volume OSD (injected into kiosk Chrome via CDP) ─────────────────────────
+
+async function showVolumeOSD(volume: number, muted: boolean): Promise<void> {
+  try {
+    const target = await getCdpTarget();
+    if (!target) return;
+
+    const ws = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve();
+      ws.onerror = () => reject();
+      setTimeout(() => reject(), 2000);
+    });
+
+    const icon = muted ? "🔇" : volume === 0 ? "🔈" : volume < 50 ? "🔉" : "🔊";
+    const barWidth = Math.min(100, Math.max(0, volume));
+    const label = muted ? "Muted" : volume + "%";
+
+    const js = `
+      (function() {
+        let el = document.getElementById('__vol_osd');
+        if (!el) {
+          el = document.createElement('div');
+          el.id = '__vol_osd';
+          el.style.cssText = 'position:fixed;top:40px;left:50%;transform:translateX(-50%);z-index:999999;background:rgba(0,0,0,0.85);border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:16px 24px;display:flex;align-items:center;gap:14px;font-family:-apple-system,system-ui,sans-serif;color:#fff;pointer-events:none;transition:opacity 0.4s;backdrop-filter:blur(12px);min-width:220px;';
+          el.innerHTML = '<span id="__vol_icon" style="font-size:28px"></span><div style="flex:1"><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span id="__vol_label" style="font-size:13px;font-weight:500"></span></div><div style="background:rgba(255,255,255,0.15);border-radius:4px;height:6px;overflow:hidden"><div id="__vol_bar" style="height:100%;border-radius:4px;transition:width 0.15s,background 0.15s"></div></div></div>';
+          document.body.appendChild(el);
+        }
+        el.querySelector('#__vol_icon').textContent = '${icon}';
+        el.querySelector('#__vol_label').textContent = '${label}';
+        const bar = el.querySelector('#__vol_bar');
+        bar.style.width = '${barWidth}%';
+        bar.style.background = ${muted} ? '#666' : '${volume > 100 ? "#ff6b6b" : "#4a9eff"}';
+        el.style.opacity = '1';
+        clearTimeout(window.__volOsdTimer);
+        window.__volOsdTimer = setTimeout(() => { el.style.opacity = '0'; }, 2000);
+      })();
+    `;
+
+    await cdpSend(ws, "Runtime.evaluate", { expression: js });
+    ws.close();
+  } catch {}
+}
+
 async function navigateKiosk(url: string, recordHistory = true): Promise<{ ok: boolean; error?: string }> {
   try {
     const target = await getCdpTarget();
@@ -2261,12 +2305,22 @@ const server = serve({
       const body = await req.json() as { volume: number };
       const vol = Math.max(0, Math.min(150, body.volume)) / 100;
       wpctl(`set-volume @DEFAULT_AUDIO_SINK@ ${vol.toFixed(2)}`);
-      return Response.json({ ok: true, volume: Math.round(vol * 100) });
+      const newVol = Math.round(vol * 100);
+      // Check mute state for OSD
+      const muteCheck = wpctl("get-volume @DEFAULT_AUDIO_SINK@");
+      const isMuted = muteCheck.includes("[MUTED]");
+      showVolumeOSD(newVol, isMuted);
+      return Response.json({ ok: true, volume: newVol });
     }
 
     if (path === "/api/audio/mute" && req.method === "POST") {
       const body = await req.json() as { muted: boolean };
       wpctl(`set-mute @DEFAULT_AUDIO_SINK@ ${body.muted ? "1" : "0"}`);
+      // Get current volume for OSD
+      const volCheck = wpctl("get-volume @DEFAULT_AUDIO_SINK@");
+      const volMatch = volCheck.match(/Volume:\s*([\d.]+)/);
+      const curVol = volMatch ? Math.round(parseFloat(volMatch[1]) * 100) : 100;
+      showVolumeOSD(curVol, body.muted);
       return Response.json({ ok: true, muted: body.muted });
     }
 
