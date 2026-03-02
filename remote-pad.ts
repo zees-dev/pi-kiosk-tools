@@ -1135,6 +1135,11 @@ async function main() {
         return new Response(serveUI(), { headers: { "Content-Type": "text/html; charset=utf-8" } });
       }
 
+      // Health check
+      if (url.pathname === "/health") {
+        return new Response(JSON.stringify({ status: "ok" }), { headers: { "Content-Type": "application/json" } });
+      }
+
       return new Response("Not Found", { status: 404 });
     },
     websocket: {

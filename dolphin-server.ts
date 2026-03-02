@@ -1,0 +1,1163 @@
+/**
+ * Dolphin Manager - Single-file Bun fullstack server
+ *
+ * Web UI for managing Dolphin Emulator on the Pi kiosk.
+ * Browse GameCube/Wii ROMs, launch games, configure settings.
+ *
+ * Usage: bun run dolphin-server.ts
+ * Then open http://localhost:3460
+ */
+
+import { serve, spawn as bunSpawn, type Subprocess } from "bun";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from "fs";
+import { execSync } from "child_process";
+import { join, basename, extname } from "path";
+
+const PORT = 3460;
+const BASE_DIR = import.meta.dir;
+const DOLPHIN_DIR = join(BASE_DIR, "dolphin");
+const CONFIG_DIR = join(DOLPHIN_DIR, "Config");
+const DOLPHIN_NOGUI = "/run/current-system/sw/bin/dolphin-emu-nogui";
+const DOLPHIN_GUI = "/run/current-system/sw/bin/dolphin-emu";
+const SUDO = "/run/wrappers/bin/sudo";
+const CAGE_BIN = "/run/current-system/sw/bin/cage";
+const ENV_BIN = "/run/current-system/sw/bin/env";
+const ROM_EXTENSIONS = new Set([".iso", ".gcm", ".gcz", ".ciso", ".wbfs"]);
+
+// ── Process State ───────────────────────────────────────────────────────────
+
+type DolphinState = "idle" | "running" | "dolphin-ui";
+
+let dolphinProc: Subprocess | null = null;
+let currentRom: string = "";
+let currentState: DolphinState = "idle";
+let lastError: string = "";
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function run(cmd: string, timeout = 10000): string {
+  try {
+    return execSync(cmd, {
+      timeout,
+      encoding: "utf-8",
+      env: { ...process.env, PATH: "/run/current-system/sw/bin:/run/wrappers/bin:" + (process.env.PATH || "") },
+    }).trim();
+  } catch (e: any) {
+    return e.stdout?.toString()?.trim() || "";
+  }
+}
+
+function stopKiosk(): void {
+  try {
+    execSync(`${SUDO} systemctl stop kiosk.service`, { timeout: 10000 });
+  } catch {}
+}
+
+function restartKiosk(): void {
+  try {
+    // Remove any runtime drop-in overrides (e.g. Restart=no from other tools)
+    execSync(`${SUDO} rm -rf /run/systemd/system/kiosk.service.d`, { timeout: 5000 });
+    execSync(`${SUDO} systemctl daemon-reload`, { timeout: 5000 });
+    execSync(`${SUDO} systemctl restart kiosk.service`, { timeout: 10000 });
+  } catch {}
+}
+
+function ensureDirs(): void {
+  const dirs = [
+    join(DOLPHIN_DIR, "gamecube", "roms"),
+    join(DOLPHIN_DIR, "wii", "roms"),
+  ];
+  for (const dir of dirs) {
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  }
+}
+
+ensureDirs();
+
+// ── ROM Scanner ─────────────────────────────────────────────────────────────
+
+interface RomEntry {
+  name: string;
+  displayName: string;
+  filename: string;
+  ext: string;
+  size: number;
+  sizeFormatted: string;
+  mtime: number;
+  mtimeFormatted: string;
+  platform: string;
+  path: string;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+}
+
+function prettifyName(filename: string): string {
+  const name = filename.replace(/\.[^.]+$/, "");
+  return name
+    .replace(/[_-]/g, " ")
+    .replace(/\s*\([^)]*\)\s*/g, " ")
+    .replace(/\s*\[[^\]]*\]\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function scanRoms(): { gamecube: RomEntry[]; wii: RomEntry[] } {
+  const result: { gamecube: RomEntry[]; wii: RomEntry[] } = { gamecube: [], wii: [] };
+
+  for (const platform of ["gamecube", "wii"] as const) {
+    const romDir = join(DOLPHIN_DIR, platform, "roms");
+    if (!existsSync(romDir)) continue;
+    const files = readdirSync(romDir);
+    for (const file of files) {
+      const ext = extname(file).toLowerCase();
+      if (!ROM_EXTENSIONS.has(ext)) continue;
+      const fullPath = join(romDir, file);
+      try {
+        const st = statSync(fullPath);
+        if (!st.isFile()) continue;
+        result[platform].push({
+          name: file,
+          displayName: prettifyName(file),
+          filename: file,
+          ext: ext.slice(1).toUpperCase(),
+          size: st.size,
+          sizeFormatted: formatSize(st.size),
+          mtime: st.mtimeMs,
+          mtimeFormatted: new Date(st.mtimeMs).toLocaleDateString("en-NZ", {
+            day: "numeric",
+            month: "short",
+            year: "numeric",
+          }),
+          platform,
+          path: fullPath,
+        });
+      } catch {}
+    }
+    result[platform].sort((a, b) => a.displayName.localeCompare(b.displayName));
+  }
+  return result;
+}
+
+// ── INI Parser/Writer ───────────────────────────────────────────────────────
+
+interface IniData {
+  sections: { name: string; entries: { type: "kv" | "comment" | "blank"; key?: string; value?: string; raw: string }[] }[];
+}
+
+function parseIni(content: string): IniData {
+  const result: IniData = { sections: [{ name: "", entries: [] }] };
+  let currentSection = result.sections[0];
+
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      const name = trimmed.slice(1, -1);
+      currentSection = { name, entries: [] };
+      result.sections.push(currentSection);
+    } else if (trimmed === "" || trimmed.startsWith("#") || trimmed.startsWith(";")) {
+      currentSection.entries.push({ type: trimmed === "" ? "blank" : "comment", raw: line });
+    } else {
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx > 0) {
+        const key = trimmed.slice(0, eqIdx).trim();
+        const value = trimmed.slice(eqIdx + 1).trim();
+        currentSection.entries.push({ type: "kv", key, value, raw: line });
+      } else {
+        currentSection.entries.push({ type: "comment", raw: line });
+      }
+    }
+  }
+  return result;
+}
+
+function serializeIni(data: IniData): string {
+  const lines: string[] = [];
+  for (const section of data.sections) {
+    if (section.name) lines.push(`[${section.name}]`);
+    for (const entry of section.entries) {
+      if (entry.type === "kv") {
+        lines.push(`${entry.key} = ${entry.value}`);
+      } else {
+        lines.push(entry.raw);
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
+function getIniValue(data: IniData, section: string, key: string): string | null {
+  const sec = data.sections.find((s) => s.name === section);
+  if (!sec) return null;
+  const entry = sec.entries.find((e) => e.type === "kv" && e.key === key);
+  return entry?.value ?? null;
+}
+
+function setIniValue(data: IniData, section: string, key: string, value: string): void {
+  let sec = data.sections.find((s) => s.name === section);
+  if (!sec) {
+    sec = { name: section, entries: [] };
+    data.sections.push(sec);
+  }
+  const entry = sec.entries.find((e) => e.type === "kv" && e.key === key);
+  if (entry) {
+    entry.value = value;
+  } else {
+    sec.entries.push({ type: "kv", key, value, raw: `${key} = ${value}` });
+  }
+}
+
+function readIniFile(filename: string): IniData {
+  const path = join(CONFIG_DIR, filename);
+  if (!existsSync(path)) return { sections: [] };
+  return parseIni(readFileSync(path, "utf-8"));
+}
+
+function writeIniFile(filename: string, data: IniData): void {
+  const path = join(CONFIG_DIR, filename);
+  writeFileSync(path, serializeIni(data));
+}
+
+// ── Settings ────────────────────────────────────────────────────────────────
+
+interface Settings {
+  gfx: {
+    efbScale: string;
+    msaa: string;
+    showFps: string;
+    maxAnisotropy: string;
+    vsync: string;
+  };
+  dolphin: {
+    gfxBackend: string;
+    cpuCore: string;
+    fullscreen: string;
+    overclockEnable: string;
+    overclock: string;
+  };
+  controllers: {
+    player: number;
+    device: string;
+    buttonCount: number;
+  }[];
+}
+
+function readSettings(): Settings {
+  const gfx = readIniFile("GFX.ini");
+  const dolphin = readIniFile("Dolphin.ini");
+  const gcpad = readIniFile("GCPadNew.ini");
+
+  // Parse controllers
+  const controllers: Settings["controllers"] = [];
+  for (let i = 1; i <= 4; i++) {
+    const sec = gcpad.sections.find((s) => s.name === `GCPad${i}`);
+    if (!sec) continue;
+    const device = sec.entries.find((e) => e.type === "kv" && e.key === "Device")?.value || "Not configured";
+    const buttonCount = sec.entries.filter(
+      (e) => e.type === "kv" && e.key !== "Device" && e.key !== undefined
+    ).length;
+    controllers.push({ player: i, device, buttonCount });
+  }
+
+  return {
+    gfx: {
+      efbScale: getIniValue(gfx, "Settings", "EFBScale") ?? "4",
+      msaa: getIniValue(gfx, "Settings", "MSAA") ?? "0x00000000",
+      showFps: getIniValue(gfx, "Settings", "ShowFPS") ?? "False",
+      maxAnisotropy: getIniValue(gfx, "Enhancements", "MaxAnisotropy") ?? "0",
+      vsync: getIniValue(gfx, "Hardware", "VSync") ?? "False",
+    },
+    dolphin: {
+      gfxBackend: getIniValue(dolphin, "Core", "GFXBackend") ?? "Vulkan",
+      cpuCore: getIniValue(dolphin, "Core", "CPUCore") ?? "1",
+      fullscreen: getIniValue(dolphin, "Display", "Fullscreen") ?? "True",
+      overclockEnable: getIniValue(dolphin, "Core", "OverclockEnable") ?? "False",
+      overclock: getIniValue(dolphin, "Core", "Overclock") ?? "1.0",
+    },
+    controllers,
+  };
+}
+
+function writeSettings(changes: { file: string; section: string; key: string; value: string }[]): void {
+  const fileCache: Record<string, IniData> = {};
+
+  for (const change of changes) {
+    if (!fileCache[change.file]) {
+      fileCache[change.file] = readIniFile(change.file);
+    }
+    setIniValue(fileCache[change.file], change.section, change.key, change.value);
+  }
+
+  for (const [filename, data] of Object.entries(fileCache)) {
+    writeIniFile(filename, data);
+  }
+}
+
+// ── Dolphin Process Management ──────────────────────────────────────────────
+
+function cleanupDolphin(): void {
+  dolphinProc = null;
+  currentRom = "";
+  currentState = "idle";
+  restartKiosk();
+}
+
+async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: string }> {
+  if (currentState !== "idle") {
+    return { ok: false, error: `Dolphin is already ${currentState === "running" ? "running a game" : "in GUI mode"}` };
+  }
+
+  // Always use nogui — Qt GUI crashes with Cage (no Xwayland on this system)
+  const binary = DOLPHIN_NOGUI;
+  if (!existsSync(binary)) {
+    return { ok: false, error: `Binary not found: ${binary}` };
+  }
+
+  if (romPath && !existsSync(romPath)) {
+    return { ok: false, error: `ROM not found: ${romPath}` };
+  }
+
+  // GUI mode without a ROM doesn't work with nogui (needs a ROM to launch)
+  if (!romPath) {
+    return { ok: false, error: "GUI mode unavailable — this kiosk has no Xwayland. Use the Settings panel to configure Dolphin instead." };
+  }
+
+  lastError = "";
+
+  // Stop kiosk (frees the DRM seat for Cage)
+  try {
+    stopKiosk();
+  } catch (e: any) {
+    lastError = "Failed to stop kiosk: " + e.message;
+  }
+
+  // Wait for seatd to release the seat
+  await new Promise((r) => setTimeout(r, 1500));
+
+  try {
+    // Dolphin args
+    const dolphinArgs = [binary, "-u", DOLPHIN_DIR];
+    if (romPath) dolphinArgs.push("-e", romPath);
+
+    // Cage args: -s (last survivor), -d (allow VT switching)
+    const cageArgs = ["-s", "-d", "--", ...dolphinArgs];
+
+    // Environment for kiosk user (owns the DRM seat)
+    const envVars: Record<string, string> = {
+      XDG_RUNTIME_DIR: "/run/user/1001",
+      LIBSEAT_BACKEND: "seatd",
+      WLR_RENDERER: "gles2",
+      WLR_NO_HARDWARE_CURSORS: "1",
+      HOME: "/var/cache/kiosk-home",
+      PULSE_SERVER: "/run/user/1001/pulse/native",
+      PATH: "/run/wrappers/bin:/run/current-system/sw/bin",
+    };
+    const envArgs = Object.entries(envVars).map(([k, v]) => `${k}=${v}`);
+
+    // sudo -u kiosk env VAR=val cage -s -d -- dolphin-emu ...
+    dolphinProc = bunSpawn({
+      cmd: [SUDO, "-u", "kiosk", ENV_BIN, ...envArgs, CAGE_BIN, ...cageArgs],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    currentState = romPath ? "running" : "dolphin-ui";
+    currentRom = romPath ? basename(romPath) : "";
+
+    // Log output
+    const readStream = (stream: ReadableStream<Uint8Array> | null, prefix: string) => {
+      if (!stream) return;
+      const reader = stream.getReader();
+      const pump = () => {
+        reader.read().then(({ done, value }) => {
+          if (done) return;
+          const text = new TextDecoder().decode(value).trim();
+          if (text) console.log(`🐬 [${prefix}] ${text}`);
+          pump();
+        }).catch(() => {});
+      };
+      pump();
+    };
+    readStream(dolphinProc.stdout, "out");
+    readStream(dolphinProc.stderr, "err");
+
+    // Monitor process exit
+    dolphinProc.exited.then((code) => {
+      console.log(`🐬 Cage+Dolphin exited (code ${code})`);
+      // Only set error for unexpected exits (not user-initiated stops)
+      if (code !== 0 && code !== null && currentState !== "idle") {
+        lastError = `Dolphin exited with code ${code}`;
+      }
+      cleanupDolphin();
+    }).catch(() => {
+      cleanupDolphin();
+    });
+
+    console.log(`🐬 Launched Cage+Dolphin (${currentState}) pid=${dolphinProc.pid}${romPath ? " rom=" + basename(romPath) : ""}`);
+    return { ok: true };
+  } catch (e: any) {
+    lastError = e.message;
+    restartKiosk();
+    return { ok: false, error: e.message };
+  }
+}
+
+async function stopDolphin(): Promise<{ ok: boolean; error?: string }> {
+  if (!dolphinProc || currentState === "idle") {
+    return { ok: false, error: "Dolphin is not running" };
+  }
+
+  const proc = dolphinProc;
+  const sudoPid = proc.pid;
+
+  try {
+    // Find the actual dolphin process (child of cage, grandchild of sudo)
+    // Send SIGINT to dolphin directly — it handles graceful shutdown on SIGINT
+    const killed = (() => {
+      try {
+        const dolphinPid = run(`pgrep -f "dolphin-emu.*-u.*/dolphin"`, 3000);
+        if (dolphinPid) {
+          const pids = dolphinPid.split("\n").map(p => p.trim()).filter(Boolean);
+          for (const pid of pids) {
+            run(`${SUDO} kill -SIGINT ${pid}`, 3000);
+          }
+          console.log(`🐬 Sent SIGINT to Dolphin pid(s): ${pids.join(", ")}`);
+          return true;
+        }
+      } catch {}
+      return false;
+    })();
+
+    if (!killed) {
+      // Fallback: kill the sudo/cage process group
+      console.log(`🐬 Fallback: killing sudo process ${sudoPid}`);
+      try { run(`${SUDO} kill ${sudoPid}`, 3000); } catch {}
+    }
+
+    // Wait up to 5 seconds for graceful exit
+    const exited = await Promise.race([
+      proc.exited.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 5000)),
+    ]);
+
+    if (!exited) {
+      // Force kill the whole process tree
+      console.log(`🐬 Graceful exit timed out, force killing`);
+      try { run(`${SUDO} kill -9 ${sudoPid}`, 3000); } catch {}
+      try { run(`${SUDO} pkill -9 -f "dolphin-emu.*-u.*/dolphin"`, 3000); } catch {}
+      await Promise.race([
+        proc.exited,
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
+    }
+
+    // State cleanup happens in the exited handler, but force it if needed
+    if (currentState !== "idle") {
+      cleanupDolphin();
+    }
+
+    lastError = ""; // Clear any exit code error since this was a user-initiated stop
+    return { ok: true };
+  } catch (e: any) {
+    // Force cleanup
+    cleanupDolphin();
+    lastError = "";
+    return { ok: true };
+  }
+}
+
+// ── HTML Frontend ───────────────────────────────────────────────────────────
+
+const HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dolphin Manager</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐬</text></svg>">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0f0f0f; color: #e0e0e0; min-height: 100vh; }
+  .container { max-width: 640px; margin: 0 auto; padding: 16px; }
+
+  /* Header */
+  header { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; margin-bottom: 16px; border-bottom: 1px solid #222; }
+  header h1 { font-size: 20px; font-weight: 600; }
+  .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+  .status-badge.idle { background: #1a2a1a; color: #4CAF50; }
+  .status-badge.running { background: #2a1a1a; color: #ff6b6b; }
+  .status-badge.dolphin-ui { background: #1a1a2a; color: #4a9eff; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .status-dot.idle { background: #4CAF50; }
+  .status-dot.running { background: #ff6b6b; animation: pulse 2s infinite; }
+  .status-dot.dolphin-ui { background: #4a9eff; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+  /* Now Playing */
+  .now-playing { background: linear-gradient(135deg, #1a1a2a, #2a1a1a); border: 1px solid #333; border-radius: 12px; padding: 20px; margin-bottom: 20px; text-align: center; }
+  .now-playing .np-label { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #888; margin-bottom: 8px; }
+  .now-playing .np-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+  .now-playing .np-mode { font-size: 12px; color: #888; margin-bottom: 16px; }
+  .now-playing .stop-btn { background: #c62828; color: #fff; border: none; border-radius: 8px; padding: 12px 32px; font-size: 15px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+  .now-playing .stop-btn:hover { background: #e53935; }
+  .now-playing .stop-btn:active { background: #b71c1c; }
+  .now-playing .stop-btn:disabled { background: #555; cursor: not-allowed; }
+
+  /* Error banner */
+  .error-banner { background: #2a1a1a; border: 1px solid #c62828; border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; color: #ff6b6b; display: flex; align-items: center; gap: 8px; }
+  .error-banner .dismiss { background: none; border: none; color: #888; cursor: pointer; margin-left: auto; font-size: 16px; }
+
+  /* Section */
+  .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #666; margin-bottom: 10px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .section-title .count { color: #888; font-weight: 400; font-size: 11px; }
+
+  /* Actions bar */
+  .actions-bar { display: flex; gap: 8px; margin-bottom: 20px; }
+  .action-btn { flex: 1; background: #1a1a1a; border: 1px solid #282828; border-radius: 8px; padding: 10px; color: #aaa; font-size: 13px; cursor: pointer; transition: all 0.15s; text-align: center; display: flex; align-items: center; justify-content: center; gap: 6px; }
+  .action-btn:hover { border-color: #444; color: #e0e0e0; background: #1e1e1e; }
+  .action-btn:active { background: #222; }
+  .action-btn.gui { border-color: #333; }
+  .action-btn.gui:hover { border-color: #4a9eff; color: #4a9eff; }
+
+  /* ROM cards */
+  .rom-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 24px; }
+  .rom-card { display: flex; align-items: center; gap: 12px; background: #1a1a1a; border: 1px solid #282828; border-radius: 10px; padding: 12px 14px; cursor: pointer; transition: all 0.15s; }
+  .rom-card:hover { border-color: #444; background: #1e1e1e; }
+  .rom-card:active { background: #222; }
+  .rom-card .rom-icon { font-size: 24px; flex-shrink: 0; width: 32px; text-align: center; }
+  .rom-card .rom-info { flex: 1; min-width: 0; }
+  .rom-card .rom-name { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rom-card .rom-meta { font-size: 11px; color: #666; display: flex; gap: 8px; flex-wrap: wrap; }
+  .rom-card .rom-meta span { white-space: nowrap; }
+  .rom-card .rom-ext { flex-shrink: 0; background: #252525; color: #888; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+  .platform-empty { text-align: center; color: #444; padding: 16px; font-size: 13px; background: #141414; border: 1px dashed #282828; border-radius: 8px; margin-bottom: 24px; }
+  .platform-empty code { color: #666; font-size: 12px; }
+
+  /* Collapsible */
+  .collapsible { cursor: pointer; user-select: none; display: flex; align-items: center; }
+  .collapsible .chevron { font-size: 10px; transition: transform 0.2s; margin-left: auto; }
+  .collapsible:not(.open) .chevron { transform: rotate(-90deg); }
+  .collapsible-content { margin-bottom: 20px; }
+  .collapsible:not(.open) + .collapsible-content { display: none; }
+
+  /* Settings */
+  .setting-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: #1a1a1a; border: 1px solid #282828; border-radius: 8px; margin-bottom: 6px; }
+  .setting-row .setting-label { font-size: 13px; font-weight: 500; }
+  .setting-row .setting-desc { font-size: 11px; color: #666; }
+  .setting-row select, .setting-row input[type="range"] { accent-color: #4a9eff; background: #111; border: 1px solid #333; color: #e0e0e0; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+  .setting-row select { min-width: 100px; }
+  .setting-row input[type="range"] { width: 100px; }
+
+  /* Toggle switch */
+  .toggle { position: relative; width: 40px; height: 22px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle .slider { position: absolute; inset: 0; background: #333; border-radius: 11px; cursor: pointer; transition: background 0.2s; }
+  .toggle .slider::before { content: ''; position: absolute; width: 18px; height: 18px; left: 2px; top: 2px; background: #888; border-radius: 50%; transition: all 0.2s; }
+  .toggle input:checked + .slider { background: #2e7d32; }
+  .toggle input:checked + .slider::before { transform: translateX(18px); background: #4CAF50; }
+
+  /* Controllers */
+  .ctrl-card { background: #1a1a1a; border: 1px solid #282828; border-radius: 8px; padding: 10px 14px; margin-bottom: 6px; }
+  .ctrl-card .ctrl-player { font-size: 12px; font-weight: 600; color: #4a9eff; margin-bottom: 2px; }
+  .ctrl-card .ctrl-device { font-size: 13px; }
+  .ctrl-card .ctrl-bindings { font-size: 11px; color: #666; }
+
+  /* Overclock slider value */
+  .oc-value { font-size: 12px; color: #4a9eff; font-weight: 500; min-width: 36px; text-align: right; }
+
+  /* Save button */
+  .save-bar { display: flex; justify-content: flex-end; margin-top: 8px; margin-bottom: 20px; }
+  .save-btn { background: #4a9eff; color: #fff; border: none; border-radius: 8px; padding: 10px 24px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+  .save-btn:hover { background: #3a8eef; }
+  .save-btn:active { background: #2a7edf; }
+  .save-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+  .save-btn.saved { background: #2e7d32; }
+
+  /* Toast */
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 100; }
+  .toast.visible { opacity: 1; }
+  .toast.error { background: #c62828; }
+  .toast.success { background: #2e7d32; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>🐬 Dolphin Manager</h1>
+    <div class="status-badge idle" id="statusBadge">
+      <span class="status-dot idle" id="statusDot"></span>
+      <span id="statusText">Idle</span>
+    </div>
+  </header>
+
+  <div id="errorBanner" style="display:none" class="error-banner">
+    <span>⚠️</span>
+    <span id="errorText"></span>
+    <button class="dismiss" onclick="dismissError()">✕</button>
+  </div>
+
+  <div id="nowPlaying" style="display:none" class="now-playing">
+    <div class="np-label">Now Playing</div>
+    <div class="np-title" id="npTitle"></div>
+    <div class="np-mode" id="npMode"></div>
+    <button class="stop-btn" id="stopBtn" onclick="stopDolphin()">⏹ Stop & Return to Kiosk</button>
+    <button class="stop-btn" id="restartBtn" onclick="restartDolphin()" style="background:#4a9eff; margin-top:8px">🔄 Restart Emulator</button>
+  </div>
+
+  <div id="idleContent">
+    <div class="actions-bar">
+      <button class="action-btn" onclick="refreshRoms()">🔄 Refresh ROMs</button>
+      <button class="action-btn gui" onclick="launchUI()" title="Unavailable — no Xwayland on this kiosk" style="opacity:0.4;cursor:not-allowed">🖥️ Dolphin UI (N/A)</button>
+    </div>
+
+    <div id="romsContainer"></div>
+  </div>
+
+  <div class="section-title collapsible open" id="settingsToggle" onclick="toggleSection('settings')">
+    ⚙️ Settings <span id="dirtyBadge" style="display:none;background:#FF9800;color:#000;font-size:10px;padding:1px 6px;border-radius:8px;font-weight:600;letter-spacing:0.3px">UNSAVED</span> <span class="chevron">▾</span>
+  </div>
+  <div class="collapsible-content" id="settingsContent">
+    <div id="settingsForm"></div>
+    <div class="save-bar">
+      <button class="save-btn" id="saveBtn" onclick="saveSettings()">Save Settings</button>
+    </div>
+  </div>
+
+  <div class="section-title collapsible" id="controllersToggle" onclick="toggleSection('controllers')">
+    🎮 Controllers <span class="count" id="ctrlCount"></span> <span class="chevron">▾</span>
+  </div>
+  <div class="collapsible-content" id="controllersContent">
+    <div id="controllersList"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let state = { state: 'idle', rom: '' };
+let settings = null;
+let toastTimer = null;
+let pollInterval = null;
+
+function showToast(msg, type = 'success') {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast visible ' + type;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.className = 'toast', 2500);
+}
+
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function toggleSection(name) {
+  const toggle = $(name + 'Toggle');
+  toggle.classList.toggle('open');
+}
+
+function dismissError() {
+  $('errorBanner').style.display = 'none';
+}
+
+function showError(msg) {
+  $('errorText').textContent = msg;
+  $('errorBanner').style.display = 'flex';
+}
+
+// ── Status ──
+function updateUI() {
+  const badge = $('statusBadge');
+  const dot = $('statusDot');
+  const text = $('statusText');
+  const np = $('nowPlaying');
+  const idle = $('idleContent');
+
+  badge.className = 'status-badge ' + state.state;
+  dot.className = 'status-dot ' + state.state;
+
+  if (state.state === 'idle') {
+    text.textContent = 'Idle';
+    np.style.display = 'none';
+    idle.style.display = 'block';
+  } else if (state.state === 'running') {
+    text.textContent = 'Running';
+    np.style.display = 'block';
+    idle.style.display = 'none';
+    $('npTitle').textContent = state.rom || 'Unknown ROM';
+    $('npMode').textContent = 'nogui mode';
+  } else if (state.state === 'dolphin-ui') {
+    text.textContent = 'GUI Mode';
+    np.style.display = 'block';
+    idle.style.display = 'none';
+    $('npTitle').textContent = 'Dolphin GUI';
+    $('npMode').textContent = 'Full Dolphin interface';
+  }
+}
+
+async function loadStatus() {
+  try {
+    const resp = await fetch('/api/status');
+    const data = await resp.json();
+    const prev = state.state;
+    state = data;
+    updateUI();
+    if (data.error) showError(data.error);
+    // If we transitioned to idle, refresh ROMs
+    if (prev !== 'idle' && data.state === 'idle') refreshRoms();
+  } catch {}
+}
+
+// ── ROMs ──
+async function loadRoms() {
+  try {
+    const resp = await fetch('/api/roms');
+    const data = await resp.json();
+    renderRoms(data);
+  } catch { $('romsContainer').innerHTML = '<div class="platform-empty">Failed to load ROMs</div>'; }
+}
+
+function renderRoms(data) {
+  let html = '';
+  for (const [platform, label, icon] of [['gamecube', 'GameCube', '🟣'], ['wii', 'Wii', '⚪']]) {
+    const roms = data[platform] || [];
+    html += '<div class="section-title">' + icon + ' ' + label + ' <span class="count">(' + roms.length + ')</span></div>';
+    if (roms.length === 0) {
+      html += '<div class="platform-empty">No ROMs found<br><code>dolphin/' + platform + '/roms/</code></div>';
+    } else {
+      html += '<div class="rom-list">';
+      for (const rom of roms) {
+        html += '<div class="rom-card" onclick="launchRom(\\'' + escHtml(rom.platform) + '\\',\\'' + escHtml(rom.filename).replace(/'/g, "\\\\'") + '\\')">' +
+          '<div class="rom-icon">' + icon + '</div>' +
+          '<div class="rom-info"><div class="rom-name">' + escHtml(rom.displayName) + '</div>' +
+          '<div class="rom-meta"><span>' + escHtml(rom.sizeFormatted) + '</span><span>' + escHtml(rom.mtimeFormatted) + '</span></div></div>' +
+          '<span class="rom-ext">' + escHtml(rom.ext) + '</span></div>';
+      }
+      html += '</div>';
+    }
+  }
+  $('romsContainer').innerHTML = html;
+}
+
+async function refreshRoms() {
+  showToast('Scanning ROMs...');
+  await loadRoms();
+  showToast('ROMs refreshed');
+}
+
+// ── Launch ──
+async function launchRom(platform, filename) {
+  if (state.state !== 'idle') { showToast('Dolphin is already running', 'error'); return; }
+  showToast('Launching ' + filename + '...');
+  $('stopBtn').disabled = false;
+  try {
+    const resp = await fetch('/api/launch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform, rom: filename }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Game launched!');
+      loadStatus();
+    } else {
+      showToast(data.error || 'Launch failed', 'error');
+    }
+  } catch { showToast('Request failed', 'error'); }
+}
+
+async function launchUI() {
+  if (state.state !== 'idle') { showToast('Dolphin is already running', 'error'); return; }
+  showToast('Opening Dolphin UI...');
+  try {
+    const resp = await fetch('/api/launch-ui', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Dolphin UI opened');
+      loadStatus();
+    } else {
+      showToast(data.error || 'Launch failed', 'error');
+    }
+  } catch { showToast('Request failed', 'error'); }
+}
+
+async function stopDolphin() {
+  const btn = $('stopBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Stopping...';
+  showToast('Stopping Dolphin...');
+  try {
+    const resp = await fetch('/api/stop', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Dolphin stopped, kiosk restored');
+    } else {
+      showToast(data.error || 'Stop failed', 'error');
+    }
+  } catch { showToast('Request failed', 'error'); }
+  btn.disabled = false;
+  btn.textContent = '⏹ Stop & Return to Kiosk';
+  loadStatus();
+}
+
+async function restartDolphin() {
+  const btn = $('restartBtn');
+  btn.disabled = true;
+  btn.textContent = '🔄 Restarting...';
+  showToast('Restarting Dolphin...');
+  try {
+    const resp = await fetch('/api/restart', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Dolphin restarted with latest settings');
+    } else {
+      showToast(data.error || 'Restart failed', 'error');
+    }
+  } catch { showToast('Request failed', 'error'); }
+  btn.disabled = false;
+  btn.textContent = '🔄 Restart Emulator';
+  loadStatus();
+}
+
+// ── Settings ──
+async function loadSettings() {
+  try {
+    const resp = await fetch('/api/settings');
+    settings = await resp.json();
+    renderSettings();
+    renderControllers();
+  } catch {}
+}
+
+let savedValues = {};
+
+function checkDirty() {
+  let dirty = false;
+  document.querySelectorAll('[data-key]').forEach(el => {
+    const key = el.dataset.key;
+    const current = el.type === 'checkbox' ? el.checked : el.value;
+    if (savedValues[key] !== undefined && savedValues[key] !== current) dirty = true;
+  });
+  setDirty(dirty);
+}
+
+function setDirty(dirty) {
+  $('dirtyBadge').style.display = dirty ? 'inline' : 'none';
+  $('saveBtn').disabled = !dirty;
+  $('saveBtn').textContent = dirty ? 'Save Settings' : 'Settings Saved';
+}
+
+function renderSettings() {
+  if (!settings) return;
+  const s = settings;
+  let html = '';
+
+  // GFX settings
+  html += '<div style="font-size:11px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;margin-top:4px">Graphics (GFX.ini)</div>';
+
+  html += settingSelect('Graphics Backend', 'dolphin.gfxBackend', s.dolphin.gfxBackend, [
+    ['Vulkan', 'Vulkan'], ['OGL', 'OpenGL']
+  ]);
+  html += settingSelect('Internal Resolution', 'gfx.efbScale', s.gfx.efbScale, [
+    ['2', '1x (Native)'], ['4', '2x (720p)'], ['6', '3x (1080p)']
+  ]);
+  html += settingSelect('Anti-Aliasing', 'gfx.msaa', s.gfx.msaa, [
+    ['0x00000000', 'Off'], ['0x00000002', '2x MSAA'], ['0x00000004', '4x MSAA']
+  ]);
+  html += settingSelect('Anisotropic Filtering', 'gfx.maxAnisotropy', s.gfx.maxAnisotropy, [
+    ['0', '1x'], ['1', '2x'], ['2', '4x'], ['3', '8x']
+  ]);
+  html += settingToggle('Show FPS', 'gfx.showFps', s.gfx.showFps === 'True');
+  html += settingToggle('VSync', 'gfx.vsync', s.gfx.vsync === 'True');
+
+  // Dolphin settings
+  html += '<div style="font-size:11px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;margin-top:12px">Emulation (Dolphin.ini)</div>';
+
+  html += settingSelect('CPU Engine', 'dolphin.cpuCore', s.dolphin.cpuCore, [
+    ['1', 'JIT (Fast)'], ['0', 'Interpreter (Slow)']
+  ]);
+  html += settingToggle('Fullscreen', 'dolphin.fullscreen', s.dolphin.fullscreen === 'True');
+  html += settingToggle('Overclock', 'dolphin.overclockEnable', s.dolphin.overclockEnable === 'True');
+  html += settingSlider('Overclock Factor', 'dolphin.overclock', parseFloat(s.dolphin.overclock) || 1.0, 0.5, 2.0, 0.1);
+
+  $('settingsForm').innerHTML = html;
+
+  // Store initial values for dirty tracking
+  savedValues = {};
+  document.querySelectorAll('[data-key]').forEach(el => {
+    const key = el.dataset.key;
+    if (el.type === 'checkbox') savedValues[key] = el.checked;
+    else savedValues[key] = el.value;
+  });
+  setDirty(false);
+
+  // Attach change listeners for dirty tracking
+  document.querySelectorAll('[data-key]').forEach(el => {
+    const handler = () => checkDirty();
+    el.addEventListener('change', handler);
+    el.addEventListener('input', handler);
+  });
+
+  // Attach slider live update
+  const ocSlider = document.querySelector('[data-key="dolphin.overclock"]');
+  if (ocSlider) {
+    ocSlider.oninput = () => {
+      const val = parseFloat(ocSlider.value).toFixed(1);
+      ocSlider.nextElementSibling.textContent = val + 'x';
+      checkDirty();
+    };
+  }
+}
+
+function settingSelect(label, key, current, options) {
+  let opts = options.map(([val, text]) =>
+    '<option value="' + escHtml(val) + '"' + (val === current ? ' selected' : '') + '>' + escHtml(text) + '</option>'
+  ).join('');
+  return '<div class="setting-row"><div><div class="setting-label">' + escHtml(label) + '</div></div>' +
+    '<select data-key="' + key + '">' + opts + '</select></div>';
+}
+
+function settingToggle(label, key, checked) {
+  return '<div class="setting-row"><div><div class="setting-label">' + escHtml(label) + '</div></div>' +
+    '<label class="toggle"><input type="checkbox" data-key="' + key + '"' + (checked ? ' checked' : '') + '><span class="slider"></span></label></div>';
+}
+
+function settingSlider(label, key, value, min, max, step) {
+  return '<div class="setting-row"><div><div class="setting-label">' + escHtml(label) + '</div></div>' +
+    '<div style="display:flex;align-items:center;gap:8px">' +
+    '<input type="range" data-key="' + key + '" min="' + min + '" max="' + max + '" step="' + step + '" value="' + value + '">' +
+    '<span class="oc-value">' + value.toFixed(1) + 'x</span></div></div>';
+}
+
+async function saveSettings() {
+  const btn = $('saveBtn');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+
+  // Collect all changed values
+  const changes = [];
+  const mapping = {
+    'gfx.efbScale': { file: 'GFX.ini', section: 'Settings', key: 'EFBScale' },
+    'gfx.msaa': { file: 'GFX.ini', section: 'Settings', key: 'MSAA' },
+    'gfx.showFps': { file: 'GFX.ini', section: 'Settings', key: 'ShowFPS', toggle: true },
+    'gfx.maxAnisotropy': { file: 'GFX.ini', section: 'Enhancements', key: 'MaxAnisotropy' },
+    'gfx.vsync': { file: 'GFX.ini', section: 'Hardware', key: 'VSync', toggle: true },
+    'dolphin.gfxBackend': { file: 'Dolphin.ini', section: 'Core', key: 'GFXBackend' },
+    'dolphin.cpuCore': { file: 'Dolphin.ini', section: 'Core', key: 'CPUCore' },
+    'dolphin.fullscreen': { file: 'Dolphin.ini', section: 'Display', key: 'Fullscreen', toggle: true },
+    'dolphin.overclockEnable': { file: 'Dolphin.ini', section: 'Core', key: 'OverclockEnable', toggle: true },
+    'dolphin.overclock': { file: 'Dolphin.ini', section: 'Core', key: 'Overclock', slider: true },
+  };
+
+  document.querySelectorAll('[data-key]').forEach(el => {
+    const key = el.dataset.key;
+    const m = mapping[key];
+    if (!m) return;
+    let value;
+    if (m.toggle) {
+      value = el.checked ? 'True' : 'False';
+    } else if (m.slider) {
+      value = parseFloat(el.value).toFixed(1);
+    } else {
+      value = el.value;
+    }
+    changes.push({ file: m.file, section: m.section, key: m.key, value });
+  });
+
+  try {
+    const resp = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ changes }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Settings saved — takes effect on next launch / restart');
+      // Update saved values to match current
+      document.querySelectorAll('[data-key]').forEach(el => {
+        const key = el.dataset.key;
+        savedValues[key] = el.type === 'checkbox' ? el.checked : el.value;
+      });
+      setDirty(false);
+      btn.className = 'save-btn saved';
+      btn.textContent = '✓ Saved';
+      setTimeout(() => { btn.className = 'save-btn'; setDirty(false); }, 1500);
+    } else {
+      showToast(data.error || 'Save failed', 'error');
+      btn.disabled = false;
+      btn.textContent = 'Save Settings';
+    }
+  } catch {
+    showToast('Request failed', 'error');
+    btn.disabled = false;
+    btn.textContent = 'Save Settings';
+  }
+}
+
+// ── Controllers ──
+function renderControllers() {
+  if (!settings || !settings.controllers) return;
+  const ctrls = settings.controllers;
+  $('ctrlCount').textContent = '(' + ctrls.length + ' players)';
+
+  if (ctrls.length === 0) {
+    $('controllersList').innerHTML = '<div class="platform-empty">No controllers configured</div>';
+    return;
+  }
+
+  let html = '';
+  for (const c of ctrls) {
+    html += '<div class="ctrl-card">' +
+      '<div class="ctrl-player">Player ' + c.player + '</div>' +
+      '<div class="ctrl-device">' + escHtml(c.device) + '</div>' +
+      '<div class="ctrl-bindings">' + c.buttonCount + ' bindings configured</div>' +
+      '</div>';
+  }
+  $('controllersList').innerHTML = html;
+}
+
+// ── Poll ──
+function startPolling() {
+  pollInterval = setInterval(loadStatus, 3000);
+}
+
+// ── Init ──
+loadStatus();
+loadRoms();
+loadSettings();
+startPolling();
+</script>
+</body>
+</html>`;
+
+// ── HTTP Server ─────────────────────────────────────────────────────────────
+
+const server = serve({
+  port: PORT,
+  async fetch(req) {
+    const url = new URL(req.url);
+    const path = url.pathname;
+
+    // Frontend
+    if (path === "/" || path === "/index.html") {
+      return new Response(HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+
+    // API: ROM list
+    if (path === "/api/roms" && req.method === "GET") {
+      return Response.json(scanRoms());
+    }
+
+    // API: Status
+    if (path === "/api/status" && req.method === "GET") {
+      return Response.json({
+        state: currentState,
+        rom: currentRom ? prettifyName(currentRom) : undefined,
+        error: lastError || undefined,
+      });
+    }
+
+    // API: Launch ROM
+    if (path === "/api/launch" && req.method === "POST") {
+      try {
+        const body = (await req.json()) as { platform: string; rom: string };
+        if (!body.platform || !body.rom) {
+          return Response.json({ ok: false, error: "Missing platform or rom" }, { status: 400 });
+        }
+        const romPath = join(DOLPHIN_DIR, body.platform, "roms", body.rom);
+        if (!existsSync(romPath)) {
+          return Response.json({ ok: false, error: "ROM not found" }, { status: 404 });
+        }
+        const result = await launchDolphin(romPath);
+        return Response.json(result, { status: result.ok ? 200 : 500 });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    // API: Launch GUI
+    if (path === "/api/launch-ui" && req.method === "POST") {
+      const result = await launchDolphin();
+      return Response.json(result, { status: result.ok ? 200 : 500 });
+    }
+
+    // API: Restart (stop + relaunch same ROM with fresh settings)
+    if (path === "/api/restart" && req.method === "POST") {
+      if (currentState === "idle") {
+        return Response.json({ ok: false, error: "Dolphin is not running" });
+      }
+      // Remember what was running
+      const romName = currentRom;
+      const wasGui = currentState === "dolphin-ui";
+      // Find full ROM path before stopping
+      let romPath: string | undefined;
+      if (romName) {
+        for (const platform of ["gamecube", "wii"]) {
+          const candidate = join(DOLPHIN_DIR, platform, "roms", romName);
+          if (existsSync(candidate)) { romPath = candidate; break; }
+        }
+      }
+
+      // Stop current instance
+      const stopResult = await stopDolphin();
+      if (!stopResult.ok) {
+        return Response.json({ ok: false, error: "Failed to stop: " + (stopResult.error || "unknown") });
+      }
+
+      // Wait for process to fully exit and kiosk to not interfere
+      await new Promise((r) => setTimeout(r, 2000));
+
+      // Relaunch
+      if (romPath) {
+        const result = await launchDolphin(romPath);
+        return Response.json(result);
+      } else {
+        return Response.json({ ok: false, error: "Could not find original ROM to relaunch" });
+      }
+    }
+
+    // API: Stop
+    if (path === "/api/stop" && req.method === "POST") {
+      const result = await stopDolphin();
+      return Response.json(result);
+    }
+
+    // API: Get settings
+    if (path === "/api/settings" && req.method === "GET") {
+      return Response.json(readSettings());
+    }
+
+    // API: Save settings
+    if (path === "/api/settings" && req.method === "POST") {
+      try {
+        const body = (await req.json()) as { changes: { file: string; section: string; key: string; value: string }[] };
+        if (!body.changes || !Array.isArray(body.changes)) {
+          return Response.json({ ok: false, error: "Missing changes array" }, { status: 400 });
+        }
+        // Validate filenames
+        const allowedFiles = new Set(["GFX.ini", "Dolphin.ini", "GCPadNew.ini"]);
+        for (const c of body.changes) {
+          if (!allowedFiles.has(c.file)) {
+            return Response.json({ ok: false, error: `Invalid config file: ${c.file}` }, { status: 400 });
+          }
+        }
+        writeSettings(body.changes);
+        return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    // Health check
+    if (path === "/health") {
+      return Response.json({ status: "ok" });
+    }
+
+    return new Response("Not found", { status: 404 });
+  },
+});
+
+console.log(`🐬 Dolphin Manager running on http://localhost:${PORT}`);

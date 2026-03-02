@@ -1332,6 +1332,11 @@ const server = serve({
     "/": new Response(indexHtml, {
       headers: { "Content-Type": "text/html" },
     }),
+
+    // Health check
+    "/health": {
+      GET() { return Response.json({ status: "ok" }); },
+    },
     
     // API: Diagnostics (lightweight status for dashboard)
     "/api/diagnostics": {

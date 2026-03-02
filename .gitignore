@@ -2,3 +2,5 @@ node_modules/
 bun.lock
 tags.json
 kiosk-history.json
+dolphin/gamecube/roms/
+dolphin/wii/roms/

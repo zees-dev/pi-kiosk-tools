@@ -186,11 +186,11 @@ function getSystemDiagnostics() {
   }
 
   // Services health
-  const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "kiosk-dashboard"];
+  const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "kiosk-dashboard"];
   const services = serviceNames.map(name => {
     const active = run(`systemctl is-active ${name}.service 2>/dev/null`) === "active";
-    const enabled = run(`systemctl is-enabled ${name}.service 2>/dev/null`) === "enabled";
-    return { name, active, enabled };
+    const runtimeDisabled = existsSync(`/run/systemd/system/${name}.service.d/disable.conf`);
+    return { name, active, enabled: !runtimeDisabled };
   });
 
   // CPU frequency (MHz)
@@ -361,6 +361,7 @@ function getApps(): App[] {
   const mode = getKioskMode();
   const apps: App[] = [
     { id: "retrobox", name: "Retrobox", icon: "🕹️", url: `http://${ip}:3333`, description: "Retro gaming emulator" },
+    { id: "dolphin", name: "Dolphin", icon: "🐬", url: `http://${ip}:3460`, description: "GameCube / Wii emulator" },
   ];
 
   if (mode === "moonlight") {
@@ -581,6 +582,9 @@ const HTML = `<!DOCTYPE html>
   .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 200; align-items: center; justify-content: center; }
   .modal-overlay.open { display: flex; }
   .modal { background: #181818; border: 1px solid #333; border-radius: 12px; width: 90%; max-width: 500px; max-height: 80vh; overflow-y: auto; padding: 20px; position: relative; }
+  @media (max-width: 600px) {
+    .modal { width: 100%; max-width: 100%; max-height: 100%; height: 100%; border-radius: 0; border: none; }
+  }
   .modal-close { position: absolute; top: 10px; right: 14px; background: none; border: none; color: #666; font-size: 22px; cursor: pointer; padding: 4px 8px; border-radius: 4px; transition: all 0.15s; line-height: 1; }
   .modal-close:hover { color: #fff; background: #333; }
   .modal h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
@@ -697,6 +701,9 @@ const HTML = `<!DOCTYPE html>
   .svc-row .svc-dot-lg.down { background: #f44336; }
   .svc-row .svc-name { flex: 1; font-size: 13px; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .svc-row .svc-name.inactive { color: #666; }
+  .svc-row.self { background: #1a1212; border-color: #2e2020; }
+  .svc-row.self .svc-name { color: #c47070; }
+  .svc-row.self .svc-name.inactive { color: #664444; }
   .svc-toggle { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
   .svc-toggle input { opacity: 0; width: 0; height: 0; }
   .svc-toggle .slider { position: absolute; inset: 0; background: #333; border-radius: 10px; cursor: pointer; transition: background 0.2s; }
@@ -713,6 +720,12 @@ const HTML = `<!DOCTYPE html>
   .toast.visible { opacity: 1; }
   .toast.error { background: #c62828; }
   .toast.success { background: #2e7d32; }
+
+  /* Reboot button */
+  .reboot-bar { display: flex; justify-content: flex-end; margin-top: 24px; padding: 16px 0; border-top: 1px solid #1a1a1a; }
+  .reboot-btn { background: none; border: 1px solid #333; color: #666; padding: 8px 16px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.2s; }
+  .reboot-btn:hover { border-color: #f44336; color: #f44336; background: rgba(244,67,54,0.08); }
+  .reboot-btn:active { background: rgba(244,67,54,0.15); }
 </style>
 </head>
 <body>
@@ -741,13 +754,17 @@ const HTML = `<!DOCTYPE html>
 
   <div class="section-title">Recent</div>
   <ul class="history-list" id="historyList"></ul>
+
+  <div class="reboot-bar"><button class="reboot-btn" id="rebootBtn">↻ Reboot System</button></div>
 </div>
 <div class="toast" id="toast"></div>
 <div class="modal-overlay" id="sysModal">
   <div class="modal">
     <button class="modal-close" id="sysClose">✕</button>
     <h2>System Info</h2>
-    <div id="sysDetail"></div>
+    <div id="sysCards"></div>
+    <div id="portsSection" style="margin-top:8px"></div>
+    <div id="svcsSection" style="margin-top:8px"></div>
   </div>
 </div>
 
@@ -808,7 +825,7 @@ function renderStatusBar(sys) {
 function sysCard(label, value) { return '<div class="sys-card"><div class="sys-label">' + label + '</div><div class="sys-value">' + value + '</div></div>'; }
 function sysWide(label, value) { return '<div class="sys-card" style="grid-column:1/-1"><div class="sys-label">' + label + '</div><div class="sys-value">' + value + '</div></div>'; }
 
-function renderSysDetail(sys) {
+function renderSysCards(sys) {
   if (!sys) return;
   let html = '<div class="sys-grid">';
 
@@ -857,36 +874,56 @@ function renderSysDetail(sys) {
     html += sysWide('Docker', sys.containers.map(c => escHtml(c.name) + ' <span class="ok">' + escHtml(c.status) + '</span>').join('<br>'));
   }
 
-  // Listening ports
-  if (sys.ports && sys.ports.length) {
-    const portRows = sys.ports.map(p =>
-      '<div class="svc-row">' +
-        '<span class="svc-dot-lg up"></span>' +
-        '<span class="svc-name" style="flex:0 0 55px;color:#4CAF50;font-family:monospace">:' + p.port + '</span>' +
-        '<span class="svc-name" style="color:#aaa">' + escHtml(p.process) + (p.pid ? ' <span style="color:#555;font-size:11px">(' + p.pid + ')</span>' : '') + '</span>' +
-        (p.pid ? '<button class="svc-stop-btn port-kill" data-pid="' + p.pid + '" title="Kill process">✕</button>' : '') +
-      '</div>'
-    ).join('');
-    html += sysWide('Ports', '<div class="svc-list-full" id="portsList">' + portRows + '</div>');
-  }
-
-  // Services (interactive)
-  html += sysWide('Services', '<div class="svc-list-full" id="svcsList"></div>');
-
   html += '</div>';
-  $('sysDetail').innerHTML = html;
+  $('sysCards').innerHTML = html;
+}
 
-  // Attach kill handlers to port buttons
-  document.querySelectorAll('.port-kill').forEach(btn => {
+// ── Ports (cached, only re-renders on change) ──
+let lastPortsJson = '';
+
+function renderPorts(ports) {
+  const json = JSON.stringify(ports);
+  if (json === lastPortsJson) return;
+  lastPortsJson = json;
+
+  const el = $('portsSection');
+  if (!el) return;
+
+  if (!ports || !ports.length) { el.innerHTML = ''; return; }
+
+  const selfProcs = ['kiosk-dashboa', 'openclaw'];
+  const portRows = ports.map(p => {
+    const isSelf = selfProcs.some(s => p.process.startsWith(s));
+    return '<div class="svc-row' + (isSelf ? ' self' : '') + '">' +
+      '<span class="svc-dot-lg up"></span>' +
+      '<span class="svc-name" style="flex:0 0 55px;color:' + (isSelf ? '#c47070' : '#4CAF50') + ';font-family:monospace">:' + p.port + '</span>' +
+      '<span class="svc-name">' + escHtml(p.process) + (p.pid ? ' <span style="color:#555;font-size:11px">(' + p.pid + ')</span>' : '') + '</span>' +
+      (p.pid ? '<button class="svc-stop-btn port-kill" data-pid="' + p.pid + '" title="Kill process">✕</button>' : '') +
+    '</div>';
+  }).join('');
+
+  el.innerHTML =
+    '<div class="sys-card" style="margin-top:0"><div class="sys-label">Ports</div><div class="sys-value">' +
+    '<div class="svc-list-full">' + portRows + '</div></div></div>';
+
+  // Attach kill handlers
+  el.querySelectorAll('.port-kill').forEach(btn => {
     btn.onclick = async (e) => {
       e.stopPropagation();
       const pid = btn.dataset.pid;
-      if (!confirm('Kill process ' + pid + '?')) return;
+      const port = btn.closest('.svc-row')?.querySelector('.svc-name')?.textContent?.trim() || '';
+      if (!confirm('Kill process ' + pid + (port ? ' on port ' + port : '') + '?\\n\\nNote: systemd may auto-restart this service.')) return;
       showToast('Killing process ' + pid + '...');
       try {
         const resp = await fetch('/api/kill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid: parseInt(pid) }) });
         const data = await resp.json();
-        if (data.ok) { showToast('Process killed'); setTimeout(loadSystem, 1000); }
+        if (data.ok) {
+          showToast('Process killed — refreshing...');
+          lastPortsJson = ''; // force re-render on next fetch
+          setTimeout(loadSystem, 500);
+          setTimeout(loadSystem, 2000);
+          setTimeout(loadSystem, 5000);
+        }
         else showToast('Failed: ' + (data.error || 'unknown'), 'error');
       } catch { showToast('Failed to kill process', 'error'); }
     };
@@ -898,13 +935,15 @@ async function loadSystem() {
     const resp = await fetch('/api/system', { signal: AbortSignal.timeout(5000) });
     const sys = await resp.json();
     renderStatusBar(sys);
-    renderSysDetail(sys);
+    renderSysCards(sys);
+    renderPorts(sys.ports || []);
   } catch {}
 }
 
 let svcsPoll = null;
 function openSysModal() {
   $('sysModal').classList.add('open');
+  loadSystem();
   loadServices();
   svcsPoll = setInterval(loadServices, 5000);
 }
@@ -1260,6 +1299,8 @@ $('riSens').oninput = () => { riSens = parseInt($('riSens').value); localStorage
 const riPad = $('riPad'), riScroll = $('riScroll');
 let pLastX = 0, pLastY = 0, pTouchId = -1, pTapT = 0, pTapX = 0, pTapY = 0;
 let pTwoFingerTap = false, pTouchCount = 0;
+// Two-finger scroll state
+let pScrollMode = false, pScrollAccum = 0, pScrollLastY = 0;
 
 riPad.addEventListener('touchstart', (e) => {
   // Track total finger count on pad (excluding scroll strip)
@@ -1268,8 +1309,19 @@ riPad.addEventListener('touchstart', (e) => {
     const t = e.touches[i];
     if (t.target !== riScroll && t.target.parentElement !== riScroll) pTouchCount++;
   }
-  // Two-finger tap detection
-  if (pTouchCount === 2) { pTwoFingerTap = true; }
+  // Two-finger: enable scroll mode and tap detection
+  if (pTouchCount === 2) {
+    pTwoFingerTap = true;
+    pScrollMode = true;
+    pScrollAccum = 0;
+    // Use the average Y of both touches as scroll baseline
+    let sumY = 0, count = 0;
+    for (let i = 0; i < e.touches.length; i++) {
+      const t = e.touches[i];
+      if (t.target !== riScroll && t.target.parentElement !== riScroll) { sumY += t.clientY; count++; }
+    }
+    pScrollLastY = count ? sumY / count : 0;
+  }
   for (const t of e.changedTouches) {
     if (t.target === riScroll || t.target.parentElement === riScroll) continue;
     if (pTouchId < 0) { pTouchId = t.identifier; pLastX = t.clientX; pLastY = t.clientY; pTapT = performance.now(); pTapX = t.clientX; pTapY = t.clientY; pTwoFingerTap = false; }
@@ -1277,12 +1329,36 @@ riPad.addEventListener('touchstart', (e) => {
 }, { passive: true });
 
 riPad.addEventListener('touchmove', (e) => {
-  pTwoFingerTap = false; // moved = not a tap
-  for (const t of e.changedTouches) {
-    if (t.identifier === pTouchId) {
-      const dx = riAccel(t.clientX - pLastX), dy = riAccel(t.clientY - pLastY);
-      pLastX = t.clientX; pLastY = t.clientY;
-      if (dx !== 0 || dy !== 0) riSendMove(dx, dy);
+  // Recount fingers on pad
+  let fingers = 0;
+  for (let i = 0; i < e.touches.length; i++) {
+    const t = e.touches[i];
+    if (t.target !== riScroll && t.target.parentElement !== riScroll) fingers++;
+  }
+
+  if (fingers >= 2 && pScrollMode) {
+    // Two-finger drag → scroll (mac/natural direction: drag up = scroll up)
+    pTwoFingerTap = false; // moved = not a tap
+    let sumY = 0, count = 0;
+    for (let i = 0; i < e.touches.length; i++) {
+      const t = e.touches[i];
+      if (t.target !== riScroll && t.target.parentElement !== riScroll) { sumY += t.clientY; count++; }
+    }
+    const avgY = count ? sumY / count : pScrollLastY;
+    // Traditional scroll: drag up = scroll down, drag down = scroll up
+    pScrollAccum += (avgY - pScrollLastY) * (riSens / 8);
+    pScrollLastY = avgY;
+    while (pScrollAccum >= 10) { riSendScroll(1); pScrollAccum -= 10; }
+    while (pScrollAccum <= -10) { riSendScroll(-1); pScrollAccum += 10; }
+  } else {
+    // Single finger → mouse move
+    pTwoFingerTap = false;
+    for (const t of e.changedTouches) {
+      if (t.identifier === pTouchId) {
+        const dx = riAccel(t.clientX - pLastX), dy = riAccel(t.clientY - pLastY);
+        pLastX = t.clientX; pLastY = t.clientY;
+        if (dx !== 0 || dy !== 0) riSendMove(dx, dy);
+      }
     }
   }
 }, { passive: true });
@@ -1305,12 +1381,13 @@ riPad.addEventListener('touchend', (e) => {
       pTwoFingerTap = false;
     }
   }
-  // Reset touch count
+  // Reset touch count and scroll mode
   pTouchCount = 0;
   for (let i = 0; i < e.touches.length; i++) {
     const t = e.touches[i];
     if (t.target !== riScroll && t.target.parentElement !== riScroll) pTouchCount++;
   }
+  if (pTouchCount < 2) { pScrollMode = false; pScrollAccum = 0; }
 }, { passive: true });
 
 // Scroll
@@ -1369,24 +1446,34 @@ kbdInput.addEventListener('keydown', (e) => {
 // Collapsible sections
 $('favsToggle').onclick = () => { $('favsToggle').classList.toggle('open'); };
 
-// Services
+// Services (cached, only re-renders on change)
 let svcsData = [];
+let lastSvcsJson = '';
 
 async function loadServices() {
   try {
     const resp = await fetch('/api/services');
-    svcsData = await resp.json();
-  } catch { svcsData = []; }
+    const data = await resp.json();
+    const json = JSON.stringify(data);
+    if (json === lastSvcsJson) return;
+    lastSvcsJson = json;
+    svcsData = data;
+  } catch { svcsData = []; lastSvcsJson = ''; }
   renderServices();
 }
 
 function renderServices() {
-  const el = $('svcsList');
-  if (!svcsData.length) { el.innerHTML = '<div class="empty">No services</div>'; return; }
-  el.innerHTML = '';
+  const section = $('svcsSection');
+  if (!section) return;
+  if (!svcsData.length) { section.innerHTML = ''; return; }
+
+  // Build into a wrapper card matching the ports style
+  const el = document.createElement('div');
+  const selfSvcs = ['kiosk-dashboard', 'openclaw'];
   for (const svc of svcsData) {
+    const isSelf = selfSvcs.includes(svc.name);
     const row = document.createElement('div');
-    row.className = 'svc-row';
+    row.className = 'svc-row' + (isSelf ? ' self' : '');
     const actionBtn = svc.active
       ? '<button class="svc-stop-btn" data-svc="' + svc.name + '" title="Stop">✕</button>'
       : '<button class="svc-start-btn" data-svc="' + svc.name + '" title="Start">▶</button>';
@@ -1402,7 +1489,7 @@ function renderServices() {
       showToast((enabled ? 'Enabling' : 'Disabling') + ' ' + svc.name + '...');
       const resp = await fetch('/api/services/enable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: svc.name, enabled }) });
       const data = await resp.json();
-      if (data.ok) { showToast(svc.name + (enabled ? ' enabled' : ' disabled')); }
+      if (data.ok) { showToast(svc.name + (enabled ? ' enabled' : ' disabled')); lastSvcsJson = ''; setTimeout(loadServices, 1000); }
       else { showToast('Failed: ' + (data.error || 'unknown'), 'error'); e.target.checked = !enabled; }
     };
 
@@ -1413,12 +1500,15 @@ function renderServices() {
       showToast((action === 'stop' ? 'Stopping' : 'Starting') + ' ' + svc.name + '...');
       const resp = await fetch('/api/services/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: svc.name }) });
       const data = await resp.json();
-      if (data.ok) { showToast(svc.name + ' ' + (action === 'stop' ? 'stopped' : 'started')); setTimeout(loadServices, 1000); }
+      if (data.ok) { showToast(svc.name + ' ' + (action === 'stop' ? 'stopped' : 'started')); lastSvcsJson = ''; setTimeout(loadServices, 1000); }
       else { showToast('Failed: ' + (data.error || 'unknown'), 'error'); }
     };
 
     el.appendChild(row);
   }
+
+  section.innerHTML = '<div class="sys-card" style="margin-top:0"><div class="sys-label">Services</div><div class="sys-value"></div></div>';
+  section.querySelector('.sys-value').appendChild(el);
 }
 
 // Init
@@ -1450,6 +1540,17 @@ document.querySelector('header h1').onclick = async () => {
 urlInput.addEventListener('input', renderHistory);
 urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') navigate(urlInput.value.trim()); });
 goBtn.onclick = () => navigate(urlInput.value.trim());
+
+// Reboot
+$('rebootBtn').onclick = async () => {
+  if (!confirm('Reboot the system?\\n\\nAll services will restart. This takes about 30-60 seconds.')) return;
+  showToast('Rebooting...');
+  try {
+    await fetch('/api/reboot', { method: 'POST' });
+    $('rebootBtn').disabled = true;
+    $('rebootBtn').textContent = '↻ Rebooting...';
+  } catch { showToast('Reboot failed', 'error'); }
+};
 </script>
 </body>
 </html>`;
@@ -1826,12 +1927,14 @@ const server = serve({
 
     // API: service control
     if (path === "/api/services" && req.method === "GET") {
-      const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "kiosk-dashboard", "openclaw"];
-      const services = serviceNames.map(name => ({
-        name,
-        active: execSync(`systemctl is-active ${name}.service 2>/dev/null || true`, { timeout: 3000 }).toString().trim() === "active",
-        enabled: execSync(`systemctl is-enabled ${name}.service 2>/dev/null || true`, { timeout: 3000 }).toString().trim() === "enabled",
-      }));
+      const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "kiosk-dashboard", "openclaw"];
+      const services = serviceNames.map(name => {
+        const active = execSync(`systemctl is-active ${name}.service 2>/dev/null || true`, { timeout: 3000 }).toString().trim() === "active";
+        // On NixOS, systemctl is-enabled always returns "enabled" for managed services.
+        // Check for our runtime disable override instead.
+        const runtimeDisabled = existsSync(`/run/systemd/system/${name}.service.d/disable.conf`);
+        return { name, active, enabled: !runtimeDisabled };
+      });
       return Response.json(services);
     }
 
@@ -1856,9 +1959,31 @@ const server = serve({
     if (path === "/api/services/enable" && req.method === "POST") {
       const body = await req.json() as { name: string; enabled: boolean };
       if (!body.name) return Response.json({ ok: false, error: "Missing name" }, { status: 400 });
-      const action = body.enabled ? "enable" : "disable";
+      const svcName = body.name.replace(/[^a-zA-Z0-9_-]/g, ""); // sanitise
+      const overrideDir = `/run/systemd/system/${svcName}.service.d`;
+      const overrideFile = `${overrideDir}/disable.conf`;
       try {
-        execSync(`/run/wrappers/bin/sudo systemctl ${action} ${body.name}.service`, { timeout: 10000 });
+        if (!body.enabled) {
+          // Disable: create runtime override to prevent restart, then stop
+          execSync(`/run/wrappers/bin/sudo mkdir -p ${overrideDir}`, { timeout: 5000 });
+          execSync(`echo '[Service]\nRestart=no' | /run/wrappers/bin/sudo tee ${overrideFile} >/dev/null`, { timeout: 5000 });
+          execSync(`/run/wrappers/bin/sudo systemctl daemon-reload`, { timeout: 10000 });
+          execSync(`/run/wrappers/bin/sudo systemctl stop ${svcName}.service`, { timeout: 10000 });
+        } else {
+          // Enable: remove override, reload, start
+          execSync(`/run/wrappers/bin/sudo rm -rf ${overrideDir}`, { timeout: 5000 });
+          execSync(`/run/wrappers/bin/sudo systemctl daemon-reload`, { timeout: 10000 });
+          execSync(`/run/wrappers/bin/sudo systemctl start ${svcName}.service`, { timeout: 10000 });
+        }
+        return Response.json({ ok: true });
+      } catch (e: any) { return Response.json({ ok: false, error: e.message }, { status: 500 }); }
+    }
+
+    // API: reboot system
+    if (path === "/api/reboot" && req.method === "POST") {
+      try {
+        // Respond first, then reboot after a short delay
+        setTimeout(() => { try { execSync("/run/wrappers/bin/sudo reboot", { timeout: 5000 }); } catch {} }, 500);
         return Response.json({ ok: true });
       } catch (e: any) { return Response.json({ ok: false, error: e.message }, { status: 500 }); }
     }
@@ -1896,6 +2021,11 @@ const server = serve({
       if (isNaN(idx)) return Response.json({ ok: false, error: "Invalid index" }, { status: 400 });
       removeHistory(idx);
       return Response.json({ ok: true });
+    }
+
+    // Health check
+    if (path === "/health") {
+      return Response.json({ status: "ok" });
     }
 
     return new Response("Not found", { status: 404 });

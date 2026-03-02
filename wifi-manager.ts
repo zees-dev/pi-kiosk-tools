@@ -1151,6 +1151,10 @@ const server = serve({
   routes: {
     "/": new Response(indexHtml, { headers: { "Content-Type": "text/html" } }),
 
+    "/health": {
+      GET() { return Response.json({ status: "ok" }); },
+    },
+
     "/api/diagnostics": {
       GET() {
         const s = getStatus();
