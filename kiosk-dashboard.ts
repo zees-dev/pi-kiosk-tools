@@ -332,6 +332,18 @@ function getLanIp(): string {
   return "localhost";
 }
 
+// ── Kiosk Mode ──────────────────────────────────────────────────────────────
+
+const MODE_FILE = "/var/cache/kiosk-home/kiosk-mode";
+
+function getKioskMode(): string {
+  try { return readFileSync(MODE_FILE, "utf-8").trim(); } catch { return "retrobox"; }
+}
+
+function setKioskMode(mode: string) {
+  writeFileSync(MODE_FILE, mode);
+}
+
 // ── Registered Apps ─────────────────────────────────────────────────────────
 
 interface App {
@@ -341,16 +353,28 @@ interface App {
   url: string;
   description: string;
   diagnosticsUrl?: string;
+  action?: string;
 }
 
 function getApps(): App[] {
   const ip = getLanIp();
-  return [
+  const mode = getKioskMode();
+  const apps: App[] = [
     { id: "retrobox", name: "Retrobox", icon: "🕹️", url: `http://${ip}:3333`, description: "Retro gaming emulator" },
+  ];
+
+  if (mode === "moonlight") {
+    apps.unshift({ id: "moonlight-stop", name: "Stop Moonlight", icon: "🛑", url: "", description: "Return to RetroBox kiosk", action: "stop-moonlight" });
+  } else {
+    apps.push({ id: "moonlight", name: "Moonlight", icon: "🌙", url: "", description: "Stream from MacBook Pro", action: "start-moonlight" });
+  }
+
+  apps.push(
     { id: "wifi", name: "WiFi Manager", icon: "📶", url: `http://${ip}:3457`, description: "Network settings", diagnosticsUrl: `http://${ip}:3457/api/diagnostics` },
     { id: "bluetooth", name: "Bluetooth", icon: "🔵", url: `http://${ip}:3456`, description: "Controller pairing", diagnosticsUrl: `http://${ip}:3456/api/diagnostics` },
     { id: "remotepad", name: "RemotePad", icon: "🎮", url: `http://${ip}:3458`, description: "PS4 controller bridge", diagnosticsUrl: `http://${ip}:3458/api/diagnostics` },
-  ];
+  );
+  return apps;
 }
 
 // ── History Persistence ─────────────────────────────────────────────────────
@@ -975,11 +999,40 @@ function renderApps(kioskUrl) {
   appGrid.innerHTML = '';
   for (const app of apps) {
     const card = document.createElement('div');
-    card.className = 'app-card' + (kioskUrl && kioskUrl.startsWith(app.url) ? ' active' : '');
-    const diagHtml = formatDiag(app, diagCache[app.id]);
-    card.innerHTML = '<div class="icon">' + app.icon + '</div><div class="app-info"><div class="name">' + app.name + '</div><div class="desc">' + app.description + '</div></div>' + diagHtml + '<a class="open-link" href="' + app.url + '" target="_blank" title="Open in browser">↗</a>';
-    card.onclick = (e) => { if (!e.target.closest('.open-link')) navigate(app.url, false); };
+    const isActive = kioskUrl && app.url && kioskUrl.startsWith(app.url);
+    const isMoonlightStop = app.action === 'stop-moonlight';
+    card.className = 'app-card' + (isActive ? ' active' : '') + (isMoonlightStop ? ' active' : '');
+    const diagHtml = app.action ? '' : formatDiag(app, diagCache[app.id]);
+    const linkHtml = app.url ? '<a class="open-link" href="' + app.url + '" target="_blank" title="Open in browser">↗</a>' : '';
+    card.innerHTML = '<div class="icon">' + app.icon + '</div><div class="app-info"><div class="name">' + app.name + '</div><div class="desc">' + app.description + '</div></div>' + diagHtml + linkHtml;
+    if (app.action) {
+      card.onclick = () => handleMoonlightAction(app.action);
+    } else {
+      card.onclick = (e) => { if (!e.target.closest('.open-link')) navigate(app.url, false); };
+    }
     appGrid.appendChild(card);
+  }
+}
+
+async function handleMoonlightAction(action) {
+  const isStart = action === 'start-moonlight';
+  const label = isStart ? 'Starting Moonlight...' : 'Stopping Moonlight...';
+  showToast(label);
+  try {
+    const resp = await fetch('/api/kiosk-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: isStart ? 'moonlight' : 'retrobox' }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast(isStart ? 'Moonlight streaming started' : 'Returned to RetroBox');
+      setTimeout(() => { loadApps().then(() => loadStatus()); }, 3000);
+    } else {
+      showToast(data.error || 'Failed', 'error');
+    }
+  } catch {
+    showToast('Request failed', 'error');
   }
 }
 
@@ -1684,6 +1737,26 @@ const server = serve({
       try {
         execSync("/run/wrappers/bin/sudo systemctl restart kiosk.service", { timeout: 10000 });
         return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    // API: kiosk mode (moonlight / retrobox)
+    if (path === "/api/kiosk-mode" && req.method === "GET") {
+      return Response.json({ mode: getKioskMode() });
+    }
+
+    if (path === "/api/kiosk-mode" && req.method === "POST") {
+      try {
+        const body = await req.json() as { mode: string };
+        const newMode = body.mode === "moonlight" ? "moonlight" : "retrobox";
+        const currentMode = getKioskMode();
+
+        setKioskMode(newMode);
+        // systemctl restart cleanly stops the current process tree (cage + moonlight/chromium)
+        execSync("/run/wrappers/bin/sudo systemctl restart kiosk.service", { timeout: 15000 });
+        return Response.json({ ok: true, mode: newMode });
       } catch (e: any) {
         return Response.json({ ok: false, error: e.message }, { status: 500 });
       }
