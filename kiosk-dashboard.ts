@@ -1199,6 +1199,12 @@ async function navigate(url, recordHistory = true) {
 let diagCache = {};
 
 function formatDiag(app, diag) {
+  // Check service status first
+  const appServiceMap = { retrobox: 'retrobox', dolphin: 'dolphin-manager', wifi: 'wifi-manager', bluetooth: 'bluetooth-manager', remotepad: 'remote-pad', vnc: 'vnc' };
+  const svcName = appServiceMap[app.id];
+  const svcInfo = svcName && window._serviceMap ? window._serviceMap[svcName] : null;
+  if (svcInfo && !svcInfo.active) return '<div class="diag"><div class="diag-line diag-off">Service disabled</div></div>';
+
   if (!diag) return '<div class="diag"><div class="diag-line diag-off">…</div></div>';
   if (diag.error) return '<div class="diag"><div class="diag-line diag-warn">⚠ error</div></div>';
 
@@ -1234,7 +1240,10 @@ function renderApps(kioskUrl) {
     const card = document.createElement('div');
     const isActive = kioskUrl && app.url && kioskUrl.startsWith(app.url);
     const isMoonlightStop = app.action === 'stop-moonlight';
-    const isDisabled = app.external && diagCache[app.id] && !diagCache[app.id].active;
+    const appServiceMap = { retrobox: 'retrobox', dolphin: 'dolphin-manager', wifi: 'wifi-manager', bluetooth: 'bluetooth-manager', remotepad: 'remote-pad', vnc: 'vnc' };
+    const svcName = appServiceMap[app.id];
+    const svcInfo = svcName && window._serviceMap ? window._serviceMap[svcName] : null;
+    const isDisabled = svcInfo ? !svcInfo.active : false;
     card.className = 'app-card' + (isActive ? ' active' : '') + (isMoonlightStop ? ' active' : '') + (isDisabled ? ' disabled' : '');
     const diagHtml = app.action ? '' : formatDiag(app, diagCache[app.id]);
     const linkHtml = (!isDisabled && app.url) ? '<a class="open-link" href="' + app.url + '" target="_blank" title="Open in browser">↗</a>' : '';
@@ -1287,6 +1296,13 @@ async function loadDiagnostics() {
     const resp = await fetch('/api/vnc', { signal: AbortSignal.timeout(3000) });
     diagCache['vnc'] = await resp.json();
   } catch { diagCache['vnc'] = null; }
+  // Service statuses for app cards
+  try {
+    const resp = await fetch('/api/services', { signal: AbortSignal.timeout(3000) });
+    const svcs = await resp.json();
+    window._serviceMap = {};
+    for (const s of svcs) window._serviceMap[s.name] = s;
+  } catch {}
   renderApps(currentUrl.textContent || '');
 }
 
@@ -2455,10 +2471,15 @@ const server = serve({
       const onDemandServices = new Set(["vnc"]);
       const services = serviceNames.map(name => {
         const active = execSync(`systemctl is-active ${name}.service 2>/dev/null || true`, { timeout: 3000 }).toString().trim() === "active";
-        // On NixOS, systemctl is-enabled always returns "enabled" for managed services.
-        // Check for our runtime disable override instead.
         const runtimeDisabled = existsSync(`/run/systemd/system/${name}.service.d/disable.conf`);
-        const enabled = onDemandServices.has(name) ? active : !runtimeDisabled;
+        // If active but stale drop-in exists, clean it up
+        if (active && runtimeDisabled) {
+          try {
+            execSync(`/run/wrappers/bin/sudo rm -rf /run/systemd/system/${name}.service.d`, { timeout: 3000 });
+            execSync(`/run/wrappers/bin/sudo systemctl daemon-reload`, { timeout: 5000 });
+          } catch {}
+        }
+        const enabled = onDemandServices.has(name) ? active : (active || !runtimeDisabled);
         return { name, active, enabled };
       });
       return Response.json(services);
