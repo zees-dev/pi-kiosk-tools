@@ -1440,9 +1440,21 @@ async function loadAudioSettings() {
     // Resolutions
     const sel = $('riResSelect');
     sel.innerHTML = '';
+    function aspectRatio(res) {
+      const [w, h] = res.replace('i','').split('x').map(Number);
+      const r = w / h;
+      const known = [
+        [16/9, '16:9'], [4/3, '4:3'], [16/10, '16:10'], [5/4, '5:4'],
+        [3/2, '3:2'], [21/9, '21:9'], [32/9, '32:9'], [256/135, '~17:9'],
+      ];
+      for (const [v, label] of known) { if (Math.abs(r - v) < 0.02) return label; }
+      function gcd(a, b) { return b === 0 ? a : gcd(b, a % b); }
+      const d = gcd(w, h);
+      return (w/d) + ':' + (h/d);
+    }
     for (const res of data.resolutions) {
       const opt = document.createElement('option');
-      opt.value = res; opt.textContent = res;
+      opt.value = res; opt.textContent = res + '  (' + aspectRatio(res) + ')';
       if (res === data.currentRes) opt.selected = true;
       sel.appendChild(opt);
     }
