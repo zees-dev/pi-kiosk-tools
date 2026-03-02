@@ -187,10 +187,11 @@ function getSystemDiagnostics() {
 
   // Services health
   const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "kiosk-dashboard"];
-  const services = serviceNames.map(name => ({
-    name,
-    active: run(`systemctl is-active ${name}.service 2>/dev/null`) === "active",
-  }));
+  const services = serviceNames.map(name => {
+    const active = run(`systemctl is-active ${name}.service 2>/dev/null`) === "active";
+    const enabled = run(`systemctl is-enabled ${name}.service 2>/dev/null`) === "enabled";
+    return { name, active, enabled };
+  });
 
   // CPU frequency (MHz)
   const cpuFreqCur = Math.round(parseInt(read("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") || "0") / 1000);
@@ -238,6 +239,30 @@ function getSystemDiagnostics() {
     nixosDate = d.toLocaleDateString("en-NZ", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   }
 
+  // Listening ports
+  let ports: { port: number; proto: string; process: string; pid: number }[] = [];
+  try {
+    const ssRaw = run("/run/current-system/sw/bin/ss -tlnp 2>/dev/null");
+    for (const line of ssRaw.split("\n").slice(1)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 6) continue;
+      const local = parts[3] || "";
+      const portMatch = local.match(/:(\d+)$/);
+      if (!portMatch) continue;
+      const port = parseInt(portMatch[1]);
+      const procInfo = parts.slice(5).join(" ");
+      const nameMatch = procInfo.match(/\("([^"]+)"/);
+      const pidMatch = procInfo.match(/pid=(\d+)/);
+      const proc = nameMatch ? nameMatch[1] : "unknown";
+      const pid = pidMatch ? parseInt(pidMatch[1]) : 0;
+      // Deduplicate (IPv4 + IPv6 both show)
+      if (!ports.some(p => p.port === port && p.process === proc)) {
+        ports.push({ port, proto: "tcp", process: proc, pid });
+      }
+    }
+    ports.sort((a, b) => a.port - b.port);
+  } catch {}
+
   return {
     cpu: { temp: cpuTemp, usage: cpuUsage, freqMhz: cpuFreqCur, maxFreqMhz: cpuFreqMax },
     gpu: { temp: gpuTemp },
@@ -257,6 +282,7 @@ function getSystemDiagnostics() {
     nixos: { generation: nixosGen, date: nixosDate },
     containers,
     services,
+    ports,
   };
 }
 
@@ -627,7 +653,8 @@ const HTML = `<!DOCTYPE html>
   .collapsible { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 4px; }
   .collapsible .chevron { font-size: 10px; transition: transform 0.2s; }
   .collapsible:not(.open) .chevron { transform: rotate(-90deg); }
-  .collapsible:not(.open) + .history-list { display: none; }
+  .collapsible:not(.open) + .history-list,
+  .collapsible:not(.open) + .svc-list-full { display: none; }
 
   /* Star / favourite button */
   .hist-star { background: none; border: none; color: #555; font-size: 16px; cursor: pointer; padding: 4px 6px; border-radius: 4px; transition: all 0.15s; }
@@ -637,6 +664,25 @@ const HTML = `<!DOCTYPE html>
   /* Favourite remove */
   .fav-remove { background: none; border: none; color: #555; font-size: 16px; cursor: pointer; padding: 4px 6px; border-radius: 4px; transition: all 0.15s; }
   .fav-remove:hover { color: #f44336; background: #2a1a1a; }
+
+  /* Services list */
+  .svc-list-full { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+  .svc-row { display: flex; align-items: center; gap: 8px; background: #1a1a1a; border: 1px solid #282828; border-radius: 8px; padding: 8px 12px; }
+  .svc-row .svc-dot-lg { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .svc-row .svc-dot-lg.up { background: #4CAF50; box-shadow: 0 0 4px #4CAF5066; }
+  .svc-row .svc-dot-lg.down { background: #f44336; }
+  .svc-row .svc-name { flex: 1; font-size: 13px; font-weight: 500; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .svc-row .svc-name.inactive { color: #666; }
+  .svc-toggle { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
+  .svc-toggle input { opacity: 0; width: 0; height: 0; }
+  .svc-toggle .slider { position: absolute; inset: 0; background: #333; border-radius: 10px; cursor: pointer; transition: background 0.2s; }
+  .svc-toggle .slider::before { content: ''; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: #888; border-radius: 50%; transition: all 0.2s; }
+  .svc-toggle input:checked + .slider { background: #2e7d32; }
+  .svc-toggle input:checked + .slider::before { transform: translateX(16px); background: #4CAF50; }
+  .svc-stop-btn { background: none; border: 1px solid #333; color: #888; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.15s; -webkit-tap-highlight-color: transparent; }
+  .svc-stop-btn:hover { border-color: #f44336; color: #f44336; background: rgba(244,67,54,0.1); }
+  .svc-start-btn { background: none; border: 1px solid #333; color: #888; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.15s; -webkit-tap-highlight-color: transparent; }
+  .svc-start-btn:hover { border-color: #4CAF50; color: #4CAF50; background: rgba(76,175,80,0.1); }
 
   /* Toast */
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 100; }
@@ -787,11 +833,40 @@ function renderSysDetail(sys) {
     html += sysWide('Docker', sys.containers.map(c => escHtml(c.name) + ' <span class="ok">' + escHtml(c.status) + '</span>').join('<br>'));
   }
 
-  // Services
-  html += sysWide('Services', '<div class="svc-list">' + sys.services.map(s => '<span class="svc-item"><span class="svc-dot ' + (s.active ? 'up' : 'down') + '"></span>' + s.name + '</span>').join('') + '</div>');
+  // Listening ports
+  if (sys.ports && sys.ports.length) {
+    const portRows = sys.ports.map(p =>
+      '<div class="svc-row">' +
+        '<span class="svc-dot-lg up"></span>' +
+        '<span class="svc-name" style="flex:0 0 55px;color:#4CAF50;font-family:monospace">:' + p.port + '</span>' +
+        '<span class="svc-name" style="color:#aaa">' + escHtml(p.process) + (p.pid ? ' <span style="color:#555;font-size:11px">(' + p.pid + ')</span>' : '') + '</span>' +
+        (p.pid ? '<button class="svc-stop-btn port-kill" data-pid="' + p.pid + '" title="Kill process">✕</button>' : '') +
+      '</div>'
+    ).join('');
+    html += sysWide('Ports', '<div class="svc-list-full" id="portsList">' + portRows + '</div>');
+  }
+
+  // Services (interactive)
+  html += sysWide('Services', '<div class="svc-list-full" id="svcsList"></div>');
 
   html += '</div>';
   $('sysDetail').innerHTML = html;
+
+  // Attach kill handlers to port buttons
+  document.querySelectorAll('.port-kill').forEach(btn => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const pid = btn.dataset.pid;
+      if (!confirm('Kill process ' + pid + '?')) return;
+      showToast('Killing process ' + pid + '...');
+      try {
+        const resp = await fetch('/api/kill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid: parseInt(pid) }) });
+        const data = await resp.json();
+        if (data.ok) { showToast('Process killed'); setTimeout(loadSystem, 1000); }
+        else showToast('Failed: ' + (data.error || 'unknown'), 'error');
+      } catch { showToast('Failed to kill process', 'error'); }
+    };
+  });
 }
 
 async function loadSystem() {
@@ -803,9 +878,19 @@ async function loadSystem() {
   } catch {}
 }
 
-$('statusBar').onclick = () => { $('sysModal').classList.add('open'); };
-$('sysClose').onclick = () => { $('sysModal').classList.remove('open'); };
-$('sysModal').onclick = (e) => { if (e.target === $('sysModal')) $('sysModal').classList.remove('open'); };
+let svcsPoll = null;
+function openSysModal() {
+  $('sysModal').classList.add('open');
+  loadServices();
+  svcsPoll = setInterval(loadServices, 5000);
+}
+function closeSysModal() {
+  $('sysModal').classList.remove('open');
+  if (svcsPoll) { clearInterval(svcsPoll); svcsPoll = null; }
+}
+$('statusBar').onclick = openSysModal;
+$('sysClose').onclick = closeSysModal;
+$('sysModal').onclick = (e) => { if (e.target === $('sysModal')) closeSysModal(); };
 
 function showToast(msg, type = 'success') {
   toast.textContent = msg;
@@ -1228,8 +1313,60 @@ kbdInput.addEventListener('keydown', (e) => {
   }
 }, { passive: false });
 
-// Collapsible favourites
+// Collapsible sections
 $('favsToggle').onclick = () => { $('favsToggle').classList.toggle('open'); };
+
+// Services
+let svcsData = [];
+
+async function loadServices() {
+  try {
+    const resp = await fetch('/api/services');
+    svcsData = await resp.json();
+  } catch { svcsData = []; }
+  renderServices();
+}
+
+function renderServices() {
+  const el = $('svcsList');
+  if (!svcsData.length) { el.innerHTML = '<div class="empty">No services</div>'; return; }
+  el.innerHTML = '';
+  for (const svc of svcsData) {
+    const row = document.createElement('div');
+    row.className = 'svc-row';
+    const actionBtn = svc.active
+      ? '<button class="svc-stop-btn" data-svc="' + svc.name + '" title="Stop">✕</button>'
+      : '<button class="svc-start-btn" data-svc="' + svc.name + '" title="Start">▶</button>';
+    row.innerHTML =
+      '<span class="svc-dot-lg ' + (svc.active ? 'up' : 'down') + '"></span>' +
+      '<span class="svc-name' + (svc.active ? '' : ' inactive') + '">' + svc.name + '</span>' +
+      '<label class="svc-toggle" title="' + (svc.enabled ? 'Disable' : 'Enable') + ' on boot"><input type="checkbox"' + (svc.enabled ? ' checked' : '') + ' data-svc="' + svc.name + '"><span class="slider"></span></label>' +
+      actionBtn;
+
+    // Toggle enable/disable
+    row.querySelector('.svc-toggle input').onchange = async (e) => {
+      const enabled = e.target.checked;
+      showToast((enabled ? 'Enabling' : 'Disabling') + ' ' + svc.name + '...');
+      const resp = await fetch('/api/services/enable', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: svc.name, enabled }) });
+      const data = await resp.json();
+      if (data.ok) { showToast(svc.name + (enabled ? ' enabled' : ' disabled')); }
+      else { showToast('Failed: ' + (data.error || 'unknown'), 'error'); e.target.checked = !enabled; }
+    };
+
+    // Stop/Start button
+    const btn = row.querySelector('.svc-stop-btn, .svc-start-btn');
+    btn.onclick = async () => {
+      const action = svc.active ? 'stop' : 'start';
+      showToast((action === 'stop' ? 'Stopping' : 'Starting') + ' ' + svc.name + '...');
+      const resp = await fetch('/api/services/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: svc.name }) });
+      const data = await resp.json();
+      if (data.ok) { showToast(svc.name + ' ' + (action === 'stop' ? 'stopped' : 'started')); setTimeout(loadServices, 1000); }
+      else { showToast('Failed: ' + (data.error || 'unknown'), 'error'); }
+    };
+
+    el.appendChild(row);
+  }
+}
 
 // Init
 loadApps().then(() => { loadStatus(); loadDiagnostics(); });
@@ -1612,6 +1749,55 @@ const server = serve({
         ws.close();
         return Response.json({ ok: true });
       } catch { return Response.json({ ok: false }); }
+    }
+
+    // API: service control
+    if (path === "/api/services" && req.method === "GET") {
+      const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "kiosk-dashboard", "openclaw"];
+      const services = serviceNames.map(name => ({
+        name,
+        active: execSync(`systemctl is-active ${name}.service 2>/dev/null || true`, { timeout: 3000 }).toString().trim() === "active",
+        enabled: execSync(`systemctl is-enabled ${name}.service 2>/dev/null || true`, { timeout: 3000 }).toString().trim() === "enabled",
+      }));
+      return Response.json(services);
+    }
+
+    if (path === "/api/services/stop" && req.method === "POST") {
+      const body = await req.json() as { name: string };
+      if (!body.name) return Response.json({ ok: false, error: "Missing name" }, { status: 400 });
+      try {
+        execSync(`/run/wrappers/bin/sudo systemctl stop ${body.name}.service`, { timeout: 10000 });
+        return Response.json({ ok: true });
+      } catch (e: any) { return Response.json({ ok: false, error: e.message }, { status: 500 }); }
+    }
+
+    if (path === "/api/services/start" && req.method === "POST") {
+      const body = await req.json() as { name: string };
+      if (!body.name) return Response.json({ ok: false, error: "Missing name" }, { status: 400 });
+      try {
+        execSync(`/run/wrappers/bin/sudo systemctl start ${body.name}.service`, { timeout: 10000 });
+        return Response.json({ ok: true });
+      } catch (e: any) { return Response.json({ ok: false, error: e.message }, { status: 500 }); }
+    }
+
+    if (path === "/api/services/enable" && req.method === "POST") {
+      const body = await req.json() as { name: string; enabled: boolean };
+      if (!body.name) return Response.json({ ok: false, error: "Missing name" }, { status: 400 });
+      const action = body.enabled ? "enable" : "disable";
+      try {
+        execSync(`/run/wrappers/bin/sudo systemctl ${action} ${body.name}.service`, { timeout: 10000 });
+        return Response.json({ ok: true });
+      } catch (e: any) { return Response.json({ ok: false, error: e.message }, { status: 500 }); }
+    }
+
+    // API: kill process by PID
+    if (path === "/api/kill" && req.method === "POST") {
+      const body = await req.json() as { pid: number };
+      if (!body.pid) return Response.json({ ok: false, error: "Missing pid" }, { status: 400 });
+      try {
+        execSync(`/run/wrappers/bin/sudo kill ${body.pid}`, { timeout: 5000 });
+        return Response.json({ ok: true });
+      } catch (e: any) { return Response.json({ ok: false, error: e.message }, { status: 500 }); }
     }
 
     // API: favourites
