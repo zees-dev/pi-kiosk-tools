@@ -36,6 +36,9 @@ let lastError: string = "";
 // ── Play History ────────────────────────────────────────────────────────────
 
 const HISTORY_FILE = join(BASE_DIR, "play-history.json");
+const PROFILES_FILE = join(BASE_DIR, "dolphin-profiles.json");
+const PREV_SETTINGS_FILE = join(BASE_DIR, "dolphin-prev-settings.json");
+const MAX_PROFILES = 5;
 
 interface PlayHistory {
   [filename: string]: { lastPlayed: number; playCount: number };
@@ -55,6 +58,83 @@ function recordPlay(filename: string): void {
   entry.playCount++;
   history[filename] = entry;
   try { writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2)); } catch {}
+}
+
+// ── Settings Profiles ───────────────────────────────────────────────────────
+
+interface SettingsProfile {
+  name: string;
+  createdAt: number;
+  settings: Record<string, string>; // key=value pairs from all settings
+}
+
+function loadProfiles(): SettingsProfile[] {
+  try {
+    if (existsSync(PROFILES_FILE)) return JSON.parse(readFileSync(PROFILES_FILE, "utf-8"));
+  } catch {}
+  return [];
+}
+
+function saveProfiles(profiles: SettingsProfile[]): void {
+  try { writeFileSync(PROFILES_FILE, JSON.stringify(profiles, null, 2)); } catch {}
+}
+
+function loadPrevSettings(): Record<string, string> | null {
+  try {
+    if (existsSync(PREV_SETTINGS_FILE)) return JSON.parse(readFileSync(PREV_SETTINGS_FILE, "utf-8"));
+  } catch {}
+  return null;
+}
+
+function savePrevSettings(settings: Record<string, string>): void {
+  try { writeFileSync(PREV_SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch {}
+}
+
+// Snapshot all current settings as a flat key=value map
+function snapshotSettings(): Record<string, string> {
+  const s = readSettings();
+  const snap: Record<string, string> = {};
+  for (const [k, v] of Object.entries(s.gfx)) snap["gfx." + k] = v;
+  for (const [k, v] of Object.entries(s.dolphin)) snap["dolphin." + k] = v;
+  return snap;
+}
+
+// Apply a flat settings snapshot to INI files
+function applySnapshot(snap: Record<string, string>): void {
+  const mapping: Record<string, { file: string; section: string; key: string; toggle?: boolean; slider?: boolean }> = {
+    "gfx.efbScale": { file: "GFX.ini", section: "Settings", key: "EFBScale" },
+    "gfx.msaa": { file: "GFX.ini", section: "Settings", key: "MSAA" },
+    "gfx.showFps": { file: "GFX.ini", section: "Settings", key: "ShowFPS" },
+    "gfx.maxAnisotropy": { file: "GFX.ini", section: "Enhancements", key: "MaxAnisotropy" },
+    "gfx.vsync": { file: "GFX.ini", section: "Hardware", key: "VSync" },
+    "gfx.shaderCompilationMode": { file: "GFX.ini", section: "Settings", key: "ShaderCompilationMode" },
+    "gfx.waitForShaders": { file: "GFX.ini", section: "Settings", key: "WaitForShadersBeforeStarting" },
+    "gfx.fastDepthCalc": { file: "GFX.ini", section: "Settings", key: "FastDepthCalc" },
+    "gfx.enablePixelLighting": { file: "GFX.ini", section: "Settings", key: "EnablePixelLighting" },
+    "gfx.backendMultithreading": { file: "GFX.ini", section: "Settings", key: "BackendMultithreading" },
+    "gfx.efbAccessEnable": { file: "GFX.ini", section: "Hacks", key: "EFBAccessEnable" },
+    "gfx.efbAccessDeferInvalidation": { file: "GFX.ini", section: "Hacks", key: "EFBAccessDeferInvalidation" },
+    "gfx.bboxEnable": { file: "GFX.ini", section: "Hacks", key: "BBoxEnable" },
+    "dolphin.gfxBackend": { file: "Dolphin.ini", section: "Core", key: "GFXBackend" },
+    "dolphin.cpuCore": { file: "Dolphin.ini", section: "Core", key: "CPUCore" },
+    "dolphin.fullscreen": { file: "Dolphin.ini", section: "Display", key: "Fullscreen" },
+    "dolphin.overclockEnable": { file: "Dolphin.ini", section: "Core", key: "OverclockEnable" },
+    "dolphin.overclock": { file: "Dolphin.ini", section: "Core", key: "Overclock" },
+    "dolphin.dspHle": { file: "Dolphin.ini", section: "Core", key: "DSPHLE" },
+    "dolphin.skipIdle": { file: "Dolphin.ini", section: "Core", key: "SkipIdle" },
+    "dolphin.syncGpu": { file: "Dolphin.ini", section: "Core", key: "SyncGPU" },
+    "dolphin.fastmem": { file: "Dolphin.ini", section: "Core", key: "Fastmem" },
+    "dolphin.mmu": { file: "Dolphin.ini", section: "Core", key: "MMU" },
+    "dolphin.fprf": { file: "Dolphin.ini", section: "Core", key: "FPRF" },
+    "dolphin.audioStretching": { file: "Dolphin.ini", section: "Core", key: "AudioStretch" },
+    "dolphin.emulationSpeed": { file: "Dolphin.ini", section: "Core", key: "EmulationSpeed" },
+  };
+  const changes: { file: string; section: string; key: string; value: string }[] = [];
+  for (const [k, v] of Object.entries(snap)) {
+    const m = mapping[k];
+    if (m) changes.push({ file: m.file, section: m.section, key: m.key, value: v });
+  }
+  if (changes.length > 0) writeSettings(changes);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -173,7 +253,7 @@ interface SaveEntry {
   name: string;
   path: string;       // relative to DOLPHIN_DIR for API use
   fullPath: string;
-  type: "gci" | "savestate";
+  type: "gci" | "savestate" | "wii";
   gameCode: string;   // 4-char game code (e.g. "GM4E")
   size: number;
   sizeFormatted: string;
@@ -220,6 +300,104 @@ function scanSaves(): SaveEntry[] {
         }
       } catch {}
     }
+  }
+
+  // Scan Wii NAND saves: Wii/title/{upper}/{lower_hex}/data/*
+  // lower_hex is the 4-char game ID encoded as ASCII hex (e.g. "SMNE" → "534d4e45")
+  const wiiTitleDir = join(DOLPHIN_DIR, "Wii", "title");
+  if (existsSync(wiiTitleDir)) {
+    try {
+      for (const upper of readdirSync(wiiTitleDir)) {
+        // Skip system titles (00000001)
+        const upperDir = join(wiiTitleDir, upper);
+        try {
+          for (const lowerHex of readdirSync(upperDir)) {
+            const dataDir = join(upperDir, lowerHex, "data");
+            if (!existsSync(dataDir)) continue;
+            // Decode game code from hex: "534d4e45" → "SMNE"
+            let gameCode = "";
+            try {
+              const buf = Buffer.from(lowerHex, "hex");
+              gameCode = buf.toString("ascii").replace(/[^\x20-\x7E]/g, "");
+            } catch {}
+            if (gameCode.length !== 4) continue;
+
+            for (const file of readdirSync(dataDir)) {
+              // Skip banner.bin (system file, not user save)
+              if (file === "banner.bin") continue;
+              const fullPath = join(dataDir, file);
+              try {
+                const st = statSync(fullPath);
+                if (!st.isFile()) continue;
+                saves.push({
+                  name: file,
+                  path: relative(DOLPHIN_DIR, fullPath),
+                  fullPath,
+                  type: "wii",
+                  gameCode,
+                  size: st.size,
+                  sizeFormatted: formatSize(st.size),
+                  mtime: st.mtimeMs,
+                  mtimeFormatted: new Date(st.mtimeMs).toLocaleDateString("en-NZ", {
+                    day: "numeric", month: "short", year: "numeric",
+                    hour: "2-digit", minute: "2-digit",
+                  }),
+                });
+              } catch {}
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  // Scan Wii system/profile saves: shared2/sys/SYSCONF, title/00000001/*/data/*
+  const wiiSharedSys = join(DOLPHIN_DIR, "Wii", "shared2", "sys", "SYSCONF");
+  if (existsSync(wiiSharedSys)) {
+    try {
+      const st = statSync(wiiSharedSys);
+      saves.push({
+        name: "SYSCONF (Wii System Config)",
+        path: relative(DOLPHIN_DIR, wiiSharedSys),
+        fullPath: wiiSharedSys,
+        type: "wii",
+        gameCode: "_WII_SYSTEM",
+        size: st.size,
+        sizeFormatted: formatSize(st.size),
+        mtime: st.mtimeMs,
+        mtimeFormatted: new Date(st.mtimeMs).toLocaleDateString("en-NZ", {
+          day: "numeric", month: "short", year: "numeric",
+          hour: "2-digit", minute: "2-digit",
+        }),
+      });
+    } catch {}
+  }
+  const wiiSysDataDir = join(DOLPHIN_DIR, "Wii", "title", "00000001", "00000002", "data");
+  if (existsSync(wiiSysDataDir)) {
+    try {
+      for (const file of readdirSync(wiiSysDataDir)) {
+        if (file === "banner.bin") continue;
+        const fullPath = join(wiiSysDataDir, file);
+        try {
+          const st = statSync(fullPath);
+          if (!st.isFile()) continue;
+          saves.push({
+            name: file + " (Wii Profile)",
+            path: relative(DOLPHIN_DIR, fullPath),
+            fullPath,
+            type: "wii",
+            gameCode: "_WII_SYSTEM",
+            size: st.size,
+            sizeFormatted: formatSize(st.size),
+            mtime: st.mtimeMs,
+            mtimeFormatted: new Date(st.mtimeMs).toLocaleDateString("en-NZ", {
+              day: "numeric", month: "short", year: "numeric",
+              hour: "2-digit", minute: "2-digit",
+            }),
+          });
+        } catch {}
+      }
+    } catch {}
   }
 
   // Scan save states: StateSaves/GAMEID.s01, .s02, etc.
@@ -359,6 +537,16 @@ interface Settings {
     showFps: string;
     maxAnisotropy: string;
     vsync: string;
+    // Performance
+    shaderCompilationMode: string;
+    waitForShaders: string;
+    fastDepthCalc: string;
+    enablePixelLighting: string;
+    backendMultithreading: string;
+    // Hacks
+    efbAccessEnable: string;
+    efbAccessDeferInvalidation: string;
+    bboxEnable: string;
   };
   dolphin: {
     gfxBackend: string;
@@ -366,6 +554,15 @@ interface Settings {
     fullscreen: string;
     overclockEnable: string;
     overclock: string;
+    // Performance
+    dspHle: string;
+    skipIdle: string;
+    syncGpu: string;
+    fastmem: string;
+    mmu: string;
+    fprf: string;
+    audioStretching: string;
+    emulationSpeed: string;
   };
   controllers: {
     player: number;
@@ -398,6 +595,16 @@ function readSettings(): Settings {
       showFps: getIniValue(gfx, "Settings", "ShowFPS") ?? "False",
       maxAnisotropy: getIniValue(gfx, "Enhancements", "MaxAnisotropy") ?? "0",
       vsync: getIniValue(gfx, "Hardware", "VSync") ?? "False",
+      // Performance
+      shaderCompilationMode: getIniValue(gfx, "Settings", "ShaderCompilationMode") ?? "0",
+      waitForShaders: getIniValue(gfx, "Settings", "WaitForShadersBeforeStarting") ?? "False",
+      fastDepthCalc: getIniValue(gfx, "Settings", "FastDepthCalc") ?? "True",
+      enablePixelLighting: getIniValue(gfx, "Settings", "EnablePixelLighting") ?? "False",
+      backendMultithreading: getIniValue(gfx, "Settings", "BackendMultithreading") ?? "True",
+      // Hacks
+      efbAccessEnable: getIniValue(gfx, "Hacks", "EFBAccessEnable") ?? "True",
+      efbAccessDeferInvalidation: getIniValue(gfx, "Hacks", "EFBAccessDeferInvalidation") ?? "False",
+      bboxEnable: getIniValue(gfx, "Hacks", "BBoxEnable") ?? "False",
     },
     dolphin: {
       gfxBackend: getIniValue(dolphin, "Core", "GFXBackend") ?? "Vulkan",
@@ -405,6 +612,15 @@ function readSettings(): Settings {
       fullscreen: getIniValue(dolphin, "Display", "Fullscreen") ?? "True",
       overclockEnable: getIniValue(dolphin, "Core", "OverclockEnable") ?? "False",
       overclock: getIniValue(dolphin, "Core", "Overclock") ?? "1.0",
+      // Performance
+      dspHle: getIniValue(dolphin, "Core", "DSPHLE") ?? "True",
+      skipIdle: getIniValue(dolphin, "Core", "SkipIdle") ?? "True",
+      syncGpu: getIniValue(dolphin, "Core", "SyncGPU") ?? "True",
+      fastmem: getIniValue(dolphin, "Core", "Fastmem") ?? "True",
+      mmu: getIniValue(dolphin, "Core", "MMU") ?? "False",
+      fprf: getIniValue(dolphin, "Core", "FPRF") ?? "False",
+      audioStretching: getIniValue(dolphin, "Core", "AudioStretch") ?? "False",
+      emulationSpeed: getIniValue(dolphin, "Core", "EmulationSpeed") ?? "1.0",
     },
     controllers,
   };
@@ -421,7 +637,17 @@ function writeSettings(changes: { file: string; section: string; key: string; va
   }
 
   for (const [filename, data] of Object.entries(fileCache)) {
-    writeIniFile(filename, data);
+    // Write via sudo tee to handle kiosk-owned files
+    const filePath = join(CONFIG_DIR, filename);
+    const content = serializeIni(data);
+    try {
+      execSync(`${SUDO} tee "${filePath}" > /dev/null`, {
+        input: content,
+        timeout: 5000,
+      });
+    } catch (e: any) {
+      throw new Error(`Failed to write ${filename}: ${e.message}`);
+    }
   }
 }
 
@@ -939,12 +1165,27 @@ const HTML = `<!DOCTYPE html>
   .oc-value { font-size: 12px; color: #4a9eff; font-weight: 500; min-width: 36px; text-align: right; }
 
   /* Save button */
-  .save-bar { display: flex; justify-content: flex-end; margin-top: 8px; margin-bottom: 20px; }
+  .save-bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; margin-bottom: 20px; }
   .save-btn { background: #4a9eff; color: #fff; border: none; border-radius: 8px; padding: 10px 24px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
   .save-btn:hover { background: #3a8eef; }
   .save-btn:active { background: #2a7edf; }
   .save-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
   .save-btn.saved { background: #2e7d32; }
+  .revert-btn { background: transparent; color: #aaa; border: 1px solid #333; border-radius: 8px; padding: 10px 16px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+  .revert-btn:hover { border-color: #FF9800; color: #FF9800; }
+  .revert-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* Profiles */
+  .profiles-section { margin-top: 12px; margin-bottom: 20px; }
+  .profiles-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  .profile-card { display: flex; align-items: center; gap: 8px; background: #1a1a1a; border: 1px solid #282828; border-radius: 8px; padding: 10px 12px; cursor: pointer; transition: all 0.15s; min-width: 0; flex: 1; min-width: 140px; max-width: 200px; }
+  .profile-card:hover { border-color: #4a9eff; background: #1e1e1e; }
+  .profile-card .profile-name { flex: 1; font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .profile-card .profile-date { font-size: 10px; color: #555; }
+  .profile-card .profile-delete { background: none; border: none; color: #444; cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; flex-shrink: 0; }
+  .profile-card .profile-delete:hover { color: #ff4444; }
+  .profile-add { display: flex; align-items: center; justify-content: center; background: transparent; border: 2px dashed #333; border-radius: 8px; padding: 10px 12px; cursor: pointer; transition: all 0.15s; min-width: 140px; max-width: 200px; flex: 1; color: #555; font-size: 13px; gap: 6px; }
+  .profile-add:hover { border-color: #4a9eff; color: #4a9eff; }
 
   /* Toast */
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity 0.3s; pointer-events: none; z-index: 100; }
@@ -992,7 +1233,12 @@ const HTML = `<!DOCTYPE html>
   <div class="collapsible-content" id="settingsContent">
     <div id="settingsForm"></div>
     <div class="save-bar">
+      <button class="revert-btn" id="revertBtn" onclick="revertSettings()" disabled>↩ Revert</button>
       <button class="save-btn" id="saveBtn" onclick="saveSettings()">Save Settings</button>
+    </div>
+    <div class="profiles-section">
+      <div style="font-size:11px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Profiles</div>
+      <div class="profiles-grid" id="profilesGrid"></div>
     </div>
   </div>
 
@@ -1012,6 +1258,8 @@ let state = { state: 'idle', rom: '' };
 let settings = null;
 let toastTimer = null;
 let pollInterval = null;
+let profiles = [];
+let hasPrevSettings = false;
 
 function showToast(msg, type = 'success') {
   const t = $('toast');
@@ -1122,7 +1370,7 @@ function renderRoms(data) {
         if (romSaves.length > 0) {
           html += '<div class="rom-saves"><div class="save-list">';
           for (const s of romSaves) {
-            const saveIcon = s.type === 'gci' ? '💾' : '📌';
+            const saveIcon = s.type === 'gci' ? '💾' : s.type === 'wii' ? '🎮' : '📌';
             html += '<div class="save-item" onclick="event.stopPropagation();downloadSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\')" title="Download: ' + escHtml(s.name) + '">' +
               '<span class="save-icon">' + saveIcon + '</span>' +
               '<span class="save-name">' + escHtml(s.name) + '</span>' +
@@ -1138,6 +1386,26 @@ function renderRoms(data) {
       html += '</div>';
     }
   }
+  // Global Wii system saves (not tied to a specific game)
+  const sysSaves = saves.filter(s => s.gameCode === '_WII_SYSTEM');
+  if (sysSaves.length > 0) {
+    html += '<div class="section-title">🌐 Wii System <span class="count">(' + sysSaves.length + ')</span></div>';
+    html += '<div class="rom-list"><div class="rom-card" style="cursor:default">' +
+      '<div class="rom-icon">⚙️</div>' +
+      '<div class="rom-info"><div class="rom-name">Wii System Profile & Config</div>' +
+      '<div class="rom-meta"><span>Global settings, play records</span></div>' +
+      '<div class="rom-saves"><div class="save-list">';
+    for (const s of sysSaves) {
+      html += '<div class="save-item" onclick="event.stopPropagation();downloadSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\')" title="Download: ' + escHtml(s.name) + '">' +
+        '<span class="save-icon">🎮</span>' +
+        '<span class="save-name">' + escHtml(s.name) + '</span>' +
+        '<span class="save-meta">' + escHtml(s.sizeFormatted) + '</span>' +
+        '<button class="save-delete" onclick="event.stopPropagation();deleteSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\',\\'' + escHtml(s.name).replace(/'/g, "\\\\'") + '\\')" title="Delete">✕</button>' +
+        '</div>';
+    }
+    html += '</div></div></div></div></div>';
+  }
+
   $('romsContainer').innerHTML = html;
 }
 
@@ -1165,6 +1433,107 @@ async function deleteSave(path, name) {
       loadRoms();
     } else {
       showToast(data.error || 'Delete failed', 'error');
+    }
+  } catch { showToast('Request failed', 'error'); }
+}
+
+// ── Profiles ──
+async function loadProfilesData() {
+  try {
+    const resp = await fetch('/api/profiles');
+    const data = await resp.json();
+    profiles = data.profiles || [];
+    hasPrevSettings = data.hasPrev || false;
+    renderProfiles();
+    $('revertBtn').disabled = !hasPrevSettings;
+  } catch {}
+}
+
+function renderProfiles() {
+  const grid = $('profilesGrid');
+  let html = '';
+  for (let i = 0; i < profiles.length; i++) {
+    const p = profiles[i];
+    const date = new Date(p.createdAt).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+    html += '<div class="profile-card" onclick="applyProfile(' + i + ')" title="Apply: ' + escHtml(p.name) + '">' +
+      '<div><div class="profile-name">' + escHtml(p.name) + '</div><div class="profile-date">' + date + '</div></div>' +
+      '<button class="profile-delete" onclick="event.stopPropagation();deleteProfile(' + i + ')" title="Delete">✕</button></div>';
+  }
+  if (profiles.length < 5) {
+    html += '<div class="profile-add" onclick="saveProfile()">+ Save Profile</div>';
+  }
+  grid.innerHTML = html;
+}
+
+async function saveProfile() {
+  const name = prompt('Profile name:', 'Profile ' + (profiles.length + 1));
+  if (!name) return;
+  try {
+    const resp = await fetch('/api/profiles/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Profile saved: ' + name);
+      loadProfilesData();
+    } else {
+      showToast(data.error || 'Failed', 'error');
+    }
+  } catch { showToast('Request failed', 'error'); }
+}
+
+async function applyProfile(index) {
+  const p = profiles[index];
+  if (!confirm('Apply profile "' + p.name + '"?\\nThis will overwrite current settings.')) return;
+  try {
+    const resp = await fetch('/api/profiles/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Applied: ' + p.name);
+      loadSettings();
+      loadProfilesData();
+    } else {
+      showToast(data.error || 'Failed', 'error');
+    }
+  } catch { showToast('Request failed', 'error'); }
+}
+
+async function deleteProfile(index) {
+  const p = profiles[index];
+  if (!confirm('Delete profile "' + p.name + '"?')) return;
+  try {
+    const resp = await fetch('/api/profiles/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Deleted: ' + p.name);
+      loadProfilesData();
+    } else {
+      showToast(data.error || 'Failed', 'error');
+    }
+  } catch { showToast('Request failed', 'error'); }
+}
+
+async function revertSettings() {
+  if (!confirm('Revert to previous settings?')) return;
+  try {
+    const resp = await fetch('/api/settings/revert', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Settings reverted');
+      loadSettings();
+      loadProfilesData();
+    } else {
+      showToast(data.error || 'Failed', 'error');
     }
   } catch { showToast('Request failed', 'error'); }
 }
@@ -1281,28 +1650,53 @@ function renderSettings() {
 
   html += settingSelect('Graphics Backend', 'dolphin.gfxBackend', s.dolphin.gfxBackend, [
     ['Vulkan', 'Vulkan'], ['OGL', 'OpenGL']
-  ]);
+  ], 'Vulkan is faster on Pi 5, OpenGL for compatibility');
   html += settingSelect('Internal Resolution', 'gfx.efbScale', s.gfx.efbScale, [
     ['2', '1x (Native)'], ['4', '2x (720p)'], ['6', '3x (1080p)']
-  ]);
+  ], 'Biggest performance lever — 1x for speed, 2x for quality');
   html += settingSelect('Anti-Aliasing', 'gfx.msaa', s.gfx.msaa, [
     ['0x00000000', 'Off'], ['0x00000002', '2x MSAA'], ['0x00000004', '4x MSAA']
-  ]);
+  ], 'Smooths edges — keep off for Pi 5 performance');
   html += settingSelect('Anisotropic Filtering', 'gfx.maxAnisotropy', s.gfx.maxAnisotropy, [
     ['0', '1x'], ['1', '2x'], ['2', '4x'], ['3', '8x']
-  ]);
-  html += settingToggle('Show FPS', 'gfx.showFps', s.gfx.showFps === 'True');
-  html += settingToggle('VSync', 'gfx.vsync', s.gfx.vsync === 'True');
+  ], 'Sharpens textures at angles — low cost');
+  html += settingToggle('Show FPS', 'gfx.showFps', s.gfx.showFps === 'True', 'Display frame rate counter on screen');
+  html += settingToggle('VSync', 'gfx.vsync', s.gfx.vsync === 'True', 'Sync to display refresh — prevents tearing, may add lag');
 
   // Dolphin settings
   html += '<div style="font-size:11px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;margin-top:12px">Emulation (Dolphin.ini)</div>';
 
   html += settingSelect('CPU Engine', 'dolphin.cpuCore', s.dolphin.cpuCore, [
     ['1', 'JIT (Fast)'], ['0', 'Interpreter (Slow)']
-  ]);
-  html += settingToggle('Fullscreen', 'dolphin.fullscreen', s.dolphin.fullscreen === 'True');
-  html += settingToggle('Overclock', 'dolphin.overclockEnable', s.dolphin.overclockEnable === 'True');
+  ], 'JIT recompiles — much faster than interpreter');
+  html += settingToggle('Fullscreen', 'dolphin.fullscreen', s.dolphin.fullscreen === 'True', 'Run in fullscreen mode');
+  html += settingToggle('Overclock', 'dolphin.overclockEnable', s.dolphin.overclockEnable === 'True', 'Overclock the emulated GameCube/Wii CPU');
   html += settingSlider('Overclock Factor', 'dolphin.overclock', parseFloat(s.dolphin.overclock) || 1.0, 0.5, 2.0, 0.1);
+
+  // Performance section
+  html += '<div style="font-size:11px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;margin-top:16px">⚡ Performance</div>';
+
+  html += settingSelect('Shader Compilation', 'gfx.shaderCompilationMode', s.gfx.shaderCompilationMode, [
+    ['0', 'Synchronous (Accurate)'], ['1', 'Async (Skip drawing)'], ['2', 'Async (Skip + Ubershaders)'], ['3', 'Hybrid Ubershaders']
+  ], 'Async modes reduce shader stutter');
+  html += settingToggle('Pre-compile Shaders', 'gfx.waitForShaders', s.gfx.waitForShaders === 'True', 'Compile shaders at boot (longer load, less stutter)');
+  html += settingToggle('Fast Depth Calc', 'gfx.fastDepthCalc', s.gfx.fastDepthCalc === 'True', 'Skip accurate depth — big GPU save');
+  html += settingToggle('Backend Multithreading', 'gfx.backendMultithreading', s.gfx.backendMultithreading === 'True', 'Use multiple CPU cores for rendering');
+  html += settingToggle('Pixel Lighting', 'gfx.enablePixelLighting', s.gfx.enablePixelLighting === 'True', 'Per-pixel lighting — expensive, off = faster');
+  html += settingToggle('EFB Access', 'gfx.efbAccessEnable', s.gfx.efbAccessEnable === 'True', 'Some games need this — disable for speed');
+  html += settingToggle('EFB Defer Invalidation', 'gfx.efbAccessDeferInvalidation', s.gfx.efbAccessDeferInvalidation === 'True', 'Defer EFB cache invalidation — faster when EFB on');
+  html += settingToggle('Bounding Box', 'gfx.bboxEnable', s.gfx.bboxEnable === 'True', 'Very expensive — only Paper Mario needs this');
+
+  html += '<div style="font-size:11px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;margin-top:16px">⚡ CPU & Audio</div>';
+
+  html += settingToggle('DSP HLE', 'dolphin.dspHle', s.dolphin.dspHle === 'True', 'High-level audio emulation — much faster than LLE');
+  html += settingToggle('Skip Idle', 'dolphin.skipIdle', s.dolphin.skipIdle === 'True', 'Skip idle CPU loops — saves cycles');
+  html += settingToggle('Sync GPU', 'dolphin.syncGpu', s.dolphin.syncGpu === 'True', 'GPU synchronization — off = faster but may glitch');
+  html += settingToggle('Fast Memory', 'dolphin.fastmem', s.dolphin.fastmem === 'True', 'Fast memory access for JIT — keep enabled');
+  html += settingToggle('Full MMU', 'dolphin.mmu', s.dolphin.mmu === 'True', 'Full memory management — very slow, rarely needed');
+  html += settingToggle('FP Result Flags', 'dolphin.fprf', s.dolphin.fprf === 'True', 'Floating point accuracy — off = faster');
+  html += settingToggle('Audio Stretching', 'dolphin.audioStretching', s.dolphin.audioStretching === 'True', 'Stretch audio to prevent crackling when slow');
+  html += settingSlider('Speed Limit', 'dolphin.emulationSpeed', parseFloat(s.dolphin.emulationSpeed) || 1.0, 0.0, 2.0, 0.1);
 
   $('settingsForm').innerHTML = html;
 
@@ -1322,27 +1716,29 @@ function renderSettings() {
     el.addEventListener('input', handler);
   });
 
-  // Attach slider live update
-  const ocSlider = document.querySelector('[data-key="dolphin.overclock"]');
-  if (ocSlider) {
-    ocSlider.oninput = () => {
-      const val = parseFloat(ocSlider.value).toFixed(1);
-      ocSlider.nextElementSibling.textContent = val + 'x';
+  // Attach slider live updates
+  document.querySelectorAll('input[type="range"][data-key]').forEach(slider => {
+    slider.oninput = () => {
+      const val = parseFloat(slider.value).toFixed(1);
+      const suffix = slider.dataset.key === 'dolphin.emulationSpeed' ? (val === '0.0' ? ' (unlimited)' : 'x') : 'x';
+      slider.nextElementSibling.textContent = val + suffix;
       checkDirty();
     };
-  }
+  });
 }
 
-function settingSelect(label, key, current, options) {
+function settingSelect(label, key, current, options, desc) {
   let opts = options.map(([val, text]) =>
     '<option value="' + escHtml(val) + '"' + (val === current ? ' selected' : '') + '>' + escHtml(text) + '</option>'
   ).join('');
-  return '<div class="setting-row"><div><div class="setting-label">' + escHtml(label) + '</div></div>' +
+  return '<div class="setting-row"><div><div class="setting-label">' + escHtml(label) + '</div>' +
+    (desc ? '<div class="setting-desc">' + escHtml(desc) + '</div>' : '') + '</div>' +
     '<select data-key="' + key + '">' + opts + '</select></div>';
 }
 
-function settingToggle(label, key, checked) {
-  return '<div class="setting-row"><div><div class="setting-label">' + escHtml(label) + '</div></div>' +
+function settingToggle(label, key, checked, desc) {
+  return '<div class="setting-row"><div><div class="setting-label">' + escHtml(label) + '</div>' +
+    (desc ? '<div class="setting-desc">' + escHtml(desc) + '</div>' : '') + '</div>' +
     '<label class="toggle"><input type="checkbox" data-key="' + key + '"' + (checked ? ' checked' : '') + '><span class="slider"></span></label></div>';
 }
 
@@ -1358,6 +1754,9 @@ async function saveSettings() {
   btn.disabled = true;
   btn.textContent = 'Saving...';
 
+  // Backup current settings before overwriting
+  try { await fetch('/api/settings/backup', { method: 'POST' }); } catch {}
+
   // Collect all changed values
   const changes = [];
   const mapping = {
@@ -1371,6 +1770,24 @@ async function saveSettings() {
     'dolphin.fullscreen': { file: 'Dolphin.ini', section: 'Display', key: 'Fullscreen', toggle: true },
     'dolphin.overclockEnable': { file: 'Dolphin.ini', section: 'Core', key: 'OverclockEnable', toggle: true },
     'dolphin.overclock': { file: 'Dolphin.ini', section: 'Core', key: 'Overclock', slider: true },
+    // Performance - GFX
+    'gfx.shaderCompilationMode': { file: 'GFX.ini', section: 'Settings', key: 'ShaderCompilationMode' },
+    'gfx.waitForShaders': { file: 'GFX.ini', section: 'Settings', key: 'WaitForShadersBeforeStarting', toggle: true },
+    'gfx.fastDepthCalc': { file: 'GFX.ini', section: 'Settings', key: 'FastDepthCalc', toggle: true },
+    'gfx.enablePixelLighting': { file: 'GFX.ini', section: 'Settings', key: 'EnablePixelLighting', toggle: true },
+    'gfx.backendMultithreading': { file: 'GFX.ini', section: 'Settings', key: 'BackendMultithreading', toggle: true },
+    'gfx.efbAccessEnable': { file: 'GFX.ini', section: 'Hacks', key: 'EFBAccessEnable', toggle: true },
+    'gfx.efbAccessDeferInvalidation': { file: 'GFX.ini', section: 'Hacks', key: 'EFBAccessDeferInvalidation', toggle: true },
+    'gfx.bboxEnable': { file: 'GFX.ini', section: 'Hacks', key: 'BBoxEnable', toggle: true },
+    // Performance - Dolphin
+    'dolphin.dspHle': { file: 'Dolphin.ini', section: 'Core', key: 'DSPHLE', toggle: true },
+    'dolphin.skipIdle': { file: 'Dolphin.ini', section: 'Core', key: 'SkipIdle', toggle: true },
+    'dolphin.syncGpu': { file: 'Dolphin.ini', section: 'Core', key: 'SyncGPU', toggle: true },
+    'dolphin.fastmem': { file: 'Dolphin.ini', section: 'Core', key: 'Fastmem', toggle: true },
+    'dolphin.mmu': { file: 'Dolphin.ini', section: 'Core', key: 'MMU', toggle: true },
+    'dolphin.fprf': { file: 'Dolphin.ini', section: 'Core', key: 'FPRF', toggle: true },
+    'dolphin.audioStretching': { file: 'Dolphin.ini', section: 'Core', key: 'AudioStretch', toggle: true },
+    'dolphin.emulationSpeed': { file: 'Dolphin.ini', section: 'Core', key: 'EmulationSpeed', slider: true },
   };
 
   document.querySelectorAll('[data-key]').forEach(el => {
@@ -1406,6 +1823,7 @@ async function saveSettings() {
       btn.className = 'save-btn saved';
       btn.textContent = '✓ Saved';
       setTimeout(() => { btn.className = 'save-btn'; setDirty(false); }, 1500);
+      loadProfilesData();
     } else {
       showToast(data.error || 'Save failed', 'error');
       btn.disabled = false;
@@ -1449,6 +1867,7 @@ function startPolling() {
 loadStatus();
 loadRoms();
 loadSettings();
+loadProfilesData();
 startPolling();
 </script>
 </body>
@@ -1627,14 +2046,101 @@ const server = serve({
         if (!existsSync(fullPath)) {
           return Response.json({ ok: false, error: "File not found" }, { status: 404 });
         }
-        // Only allow deleting save files (GCI and save states)
-        const ext = extname(fullPath).toLowerCase();
+        // Only allow deleting save files (GCI, save states, Wii NAND saves)
         const isInGC = fullPath.includes("/GC/");
         const isInStates = fullPath.includes("/StateSaves/");
-        if (!isInGC && !isInStates) {
+        const isInWii = fullPath.includes("/Wii/title/") && fullPath.includes("/data/");
+        if (!isInGC && !isInStates && !isInWii) {
           return Response.json({ ok: false, error: "Can only delete save files" }, { status: 400 });
         }
         unlinkSync(fullPath);
+        return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    // API: Get profiles + prev settings state
+    if (path === "/api/profiles" && req.method === "GET") {
+      return Response.json({
+        profiles: loadProfiles(),
+        hasPrev: existsSync(PREV_SETTINGS_FILE),
+      });
+    }
+
+    // API: Save current settings as a profile
+    if (path === "/api/profiles/save" && req.method === "POST") {
+      try {
+        const body = (await req.json()) as { name: string };
+        const profiles = loadProfiles();
+        if (profiles.length >= MAX_PROFILES) {
+          return Response.json({ ok: false, error: "Maximum 5 profiles" }, { status: 400 });
+        }
+        profiles.push({
+          name: body.name || "Profile " + (profiles.length + 1),
+          createdAt: Date.now(),
+          settings: snapshotSettings(),
+        });
+        saveProfiles(profiles);
+        return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    // API: Apply a profile
+    if (path === "/api/profiles/apply" && req.method === "POST") {
+      try {
+        const body = (await req.json()) as { index: number };
+        const profiles = loadProfiles();
+        if (body.index < 0 || body.index >= profiles.length) {
+          return Response.json({ ok: false, error: "Invalid profile index" }, { status: 400 });
+        }
+        // Backup current before applying
+        savePrevSettings(snapshotSettings());
+        applySnapshot(profiles[body.index].settings);
+        return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    // API: Delete a profile
+    if (path === "/api/profiles/delete" && req.method === "POST") {
+      try {
+        const body = (await req.json()) as { index: number };
+        const profiles = loadProfiles();
+        if (body.index < 0 || body.index >= profiles.length) {
+          return Response.json({ ok: false, error: "Invalid profile index" }, { status: 400 });
+        }
+        profiles.splice(body.index, 1);
+        saveProfiles(profiles);
+        return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    // API: Backup current settings (called before save)
+    if (path === "/api/settings/backup" && req.method === "POST") {
+      try {
+        savePrevSettings(snapshotSettings());
+        return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    // API: Revert to previous settings
+    if (path === "/api/settings/revert" && req.method === "POST") {
+      try {
+        const prev = loadPrevSettings();
+        if (!prev) {
+          return Response.json({ ok: false, error: "No previous settings to revert to" }, { status: 400 });
+        }
+        applySnapshot(prev);
+        // Remove previous settings file — one-shot revert only
+        try { unlinkSync(PREV_SETTINGS_FILE); } catch {}
         return Response.json({ ok: true });
       } catch (e: any) {
         return Response.json({ ok: false, error: e.message }, { status: 500 });

@@ -4,5 +4,7 @@ tags.json
 device-names.json
 kiosk-history.json
 play-history.json
+dolphin-profiles.json
+dolphin-prev-settings.json
 dolphin/gamecube/roms/
 dolphin/wii/roms/
