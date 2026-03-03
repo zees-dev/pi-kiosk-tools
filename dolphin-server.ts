@@ -1120,6 +1120,28 @@ const HTML = `<!DOCTYPE html>
   .platform-empty { text-align: center; color: #444; padding: 16px; font-size: 13px; background: #141414; border: 1px dashed #282828; border-radius: 8px; margin-bottom: 24px; }
   .platform-empty code { color: #666; font-size: 12px; }
 
+  /* System selector cards */
+  .system-grid { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+  .system-card { flex: 1; display: flex; align-items: center; gap: 12px; background: #1a1a1a; border: 1px solid #282828; border-radius: 12px; padding: 16px; cursor: pointer; transition: all 0.15s; }
+  .system-card:hover { border-color: #4a9eff; background: #1e1e1e; }
+  .system-card:active { background: #222; }
+  .system-card .system-icon { font-size: 32px; }
+  .system-card .system-info { flex: 1; }
+  .system-card .system-name { font-size: 16px; font-weight: 600; }
+  .system-card .system-count { font-size: 12px; color: #666; }
+  .system-card .system-arrow { color: #444; font-size: 18px; }
+
+  /* ROM modal */
+  .rom-modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 200; }
+  .rom-modal-overlay.open { display: flex; flex-direction: column; }
+  .rom-modal { flex: 1; background: #0f0f0f; display: flex; flex-direction: column; max-width: 640px; width: 100%; margin: 0 auto; overflow: hidden; }
+  .rom-modal-header { display: flex; align-items: center; gap: 12px; padding: 16px; border-bottom: 1px solid #222; flex-shrink: 0; }
+  .rom-modal-header .back-btn { background: none; border: none; color: #aaa; font-size: 22px; cursor: pointer; padding: 4px 8px; border-radius: 6px; }
+  .rom-modal-header .back-btn:hover { color: #fff; background: #222; }
+  .rom-modal-header h2 { font-size: 18px; font-weight: 600; flex: 1; }
+  .rom-modal-header .modal-count { font-size: 12px; color: #666; }
+  .rom-modal-body { flex: 1; overflow-y: auto; padding: 16px; -webkit-overflow-scrolling: touch; }
+
   /* Save files — inside ROM card */
   .rom-saves { padding: 4px 0 0; margin-top: 6px; }
   .save-list { display: flex; flex-direction: column; gap: 3px; }
@@ -1225,6 +1247,17 @@ const HTML = `<!DOCTYPE html>
     </div>
 
     <div id="romsContainer"></div>
+  </div>
+
+  <div class="rom-modal-overlay" id="romModal">
+    <div class="rom-modal">
+      <div class="rom-modal-header">
+        <button class="back-btn" onclick="history.back()">←</button>
+        <h2 id="romModalTitle"></h2>
+        <span class="modal-count" id="romModalCount"></span>
+      </div>
+      <div class="rom-modal-body" id="romModalBody"></div>
+    </div>
   </div>
 
   <div class="section-title collapsible open" id="settingsToggle" onclick="toggleSection('settings')">
@@ -1346,68 +1379,119 @@ async function loadRoms() {
   } catch { $('romsContainer').innerHTML = '<div class="platform-empty">Failed to load ROMs</div>'; }
 }
 
+let romsData = null;
+let openModalPlatform = null;
+
 function renderRoms(data) {
+  romsData = data;
+  if (openModalPlatform && $('romModal').classList.contains('open')) {
+    renderModalContent(openModalPlatform);
+  }
   const saves = data.saves || [];
-  let html = '';
+  let html = '<div class="system-grid">';
   for (const [platform, label, icon] of [['gamecube', 'GameCube', '🟣'], ['wii', 'Wii', '⚪']]) {
     const roms = data[platform] || [];
-    html += '<div class="section-title">' + icon + ' ' + label + ' <span class="count">(' + roms.length + ')</span></div>';
-    if (roms.length === 0) {
-      html += '<div class="platform-empty">No ROMs found<br><code>dolphin/' + platform + '/roms/</code></div>';
-    } else {
-      html += '<div class="rom-list">';
-      for (const rom of roms) {
-        // Find saves matching this ROM's game code
-        const romSaves = rom.gameCode ? saves.filter(s => s.gameCode === rom.gameCode) : [];
-        const lastPlayedStr = rom.lastPlayed ? timeAgo(rom.lastPlayed) : '';
-        html += '<div class="rom-card" onclick="launchRom(\\'' + escHtml(rom.platform) + '\\',\\'' + escHtml(rom.filename).replace(/'/g, "\\\\'") + '\\')">' +
-          '<div class="rom-icon">' + icon + '</div>' +
-          '<div class="rom-info"><div class="rom-name">' + escHtml(rom.displayName) + '</div>' +
-          '<div class="rom-meta"><span>' + escHtml(rom.sizeFormatted) + '</span><span>' + escHtml(rom.mtimeFormatted) + '</span>' +
-          (lastPlayedStr ? '<span style="color:#4a9eff">▶ ' + lastPlayedStr + '</span>' : '') +
-          '</div>';
-        // Save files inside the card
-        if (romSaves.length > 0) {
-          html += '<div class="rom-saves"><div class="save-list">';
-          for (const s of romSaves) {
-            const saveIcon = s.type === 'gci' ? '💾' : s.type === 'wii' ? '🎮' : '📌';
-            html += '<div class="save-item" onclick="event.stopPropagation();downloadSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\')" title="Download: ' + escHtml(s.name) + '">' +
-              '<span class="save-icon">' + saveIcon + '</span>' +
-              '<span class="save-name">' + escHtml(s.name) + '</span>' +
-              '<span class="save-meta">' + escHtml(s.sizeFormatted) + '</span>' +
-              '<button class="save-delete" onclick="event.stopPropagation();deleteSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\',\\'' + escHtml(s.name).replace(/'/g, "\\\\'") + '\\')" title="Delete">✕</button>' +
-              '</div>';
-          }
-          html += '</div></div>';
-        }
-        html += '</div>' +
-          '<span class="rom-ext">' + escHtml(rom.ext) + '</span></div>';
-      }
-      html += '</div>';
-    }
+    const recentRom = roms.find(r => r.lastPlayed);
+    const recentText = recentRom ? '▶ ' + timeAgo(recentRom.lastPlayed) : '';
+    html += '<div class="system-card" onclick="openRomModal(\\'' + platform + '\\')">' +
+      '<div class="system-icon">' + icon + '</div>' +
+      '<div class="system-info"><div class="system-name">' + label + '</div>' +
+      '<div class="system-count">' + roms.length + ' game' + (roms.length !== 1 ? 's' : '') +
+      (recentText ? ' · <span style="color:#4a9eff">' + recentText + '</span>' : '') +
+      '</div></div>' +
+      '<div class="system-arrow">›</div></div>';
   }
-  // Global Wii system saves (not tied to a specific game)
-  const sysSaves = saves.filter(s => s.gameCode === '_WII_SYSTEM');
-  if (sysSaves.length > 0) {
-    html += '<div class="section-title">🌐 Wii System <span class="count">(' + sysSaves.length + ')</span></div>';
-    html += '<div class="rom-list"><div class="rom-card" style="cursor:default">' +
-      '<div class="rom-icon">⚙️</div>' +
-      '<div class="rom-info"><div class="rom-name">Wii System Profile & Config</div>' +
-      '<div class="rom-meta"><span>Global settings, play records</span></div>' +
-      '<div class="rom-saves"><div class="save-list">';
-    for (const s of sysSaves) {
-      html += '<div class="save-item" onclick="event.stopPropagation();downloadSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\')" title="Download: ' + escHtml(s.name) + '">' +
-        '<span class="save-icon">🎮</span>' +
-        '<span class="save-name">' + escHtml(s.name) + '</span>' +
-        '<span class="save-meta">' + escHtml(s.sizeFormatted) + '</span>' +
-        '<button class="save-delete" onclick="event.stopPropagation();deleteSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\',\\'' + escHtml(s.name).replace(/'/g, "\\\\'") + '\\')" title="Delete">✕</button>' +
-        '</div>';
-    }
-    html += '</div></div></div></div></div>';
-  }
-
+  html += '</div>';
   $('romsContainer').innerHTML = html;
 }
+
+function renderModalContent(platform) {
+  if (!romsData) return;
+  const saves = romsData.saves || [];
+  const labels = { gamecube: ['GameCube', '🟣'], wii: ['Wii', '⚪'] };
+  const [label, icon] = labels[platform] || [platform, '🎮'];
+  const roms = romsData[platform] || [];
+
+  $('romModalTitle').textContent = icon + ' ' + label;
+  $('romModalCount').textContent = roms.length + ' game' + (roms.length !== 1 ? 's' : '');
+
+  let html = '';
+  if (roms.length === 0) {
+    html = '<div class="platform-empty">No ROMs found<br><code>dolphin/' + platform + '/roms/</code></div>';
+  } else {
+    html = '<div class="rom-list">';
+    for (const rom of roms) {
+      const romSaves = rom.gameCode ? saves.filter(s => s.gameCode === rom.gameCode) : [];
+      const lastPlayedStr = rom.lastPlayed ? timeAgo(rom.lastPlayed) : '';
+      html += '<div class="rom-card" onclick="launchRom(\\'' + escHtml(rom.platform) + '\\',\\'' + escHtml(rom.filename).replace(/'/g, "\\\\'") + '\\')">' +
+        '<div class="rom-icon">' + icon + '</div>' +
+        '<div class="rom-info"><div class="rom-name">' + escHtml(rom.displayName) + '</div>' +
+        '<div class="rom-meta"><span>' + escHtml(rom.sizeFormatted) + '</span><span>' + escHtml(rom.mtimeFormatted) + '</span>' +
+        (lastPlayedStr ? '<span style="color:#4a9eff">▶ ' + lastPlayedStr + '</span>' : '') +
+        '</div>';
+      if (romSaves.length > 0) {
+        html += '<div class="rom-saves"><div class="save-list">';
+        for (const s of romSaves) {
+          const saveIcon = s.type === 'gci' ? '💾' : s.type === 'wii' ? '🎮' : '📌';
+          html += '<div class="save-item" onclick="event.stopPropagation();downloadSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\')" title="Download: ' + escHtml(s.name) + '">' +
+            '<span class="save-icon">' + saveIcon + '</span>' +
+            '<span class="save-name">' + escHtml(s.name) + '</span>' +
+            '<span class="save-meta">' + escHtml(s.sizeFormatted) + '</span>' +
+            '<button class="save-delete" onclick="event.stopPropagation();deleteSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\',\\'' + escHtml(s.name).replace(/'/g, "\\\\'") + '\\')" title="Delete">✕</button>' +
+            '</div>';
+        }
+        html += '</div></div>';
+      }
+      html += '</div>' +
+        '<span class="rom-ext">' + escHtml(rom.ext) + '</span></div>';
+    }
+    html += '</div>';
+  }
+
+  // Wii system saves at bottom of Wii modal
+  if (platform === 'wii') {
+    const sysSaves = saves.filter(s => s.gameCode === '_WII_SYSTEM');
+    if (sysSaves.length > 0) {
+      html += '<div style="font-size:11px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin:16px 0 8px">🌐 Wii System</div>';
+      html += '<div class="rom-list"><div class="rom-card" style="cursor:default">' +
+        '<div class="rom-icon">⚙️</div>' +
+        '<div class="rom-info"><div class="rom-name">System Profile & Config</div>' +
+        '<div class="rom-meta"><span>Global settings, play records</span></div>' +
+        '<div class="rom-saves"><div class="save-list">';
+      for (const s of sysSaves) {
+        html += '<div class="save-item" onclick="event.stopPropagation();downloadSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\')" title="Download: ' + escHtml(s.name) + '">' +
+          '<span class="save-icon">🎮</span>' +
+          '<span class="save-name">' + escHtml(s.name) + '</span>' +
+          '<span class="save-meta">' + escHtml(s.sizeFormatted) + '</span>' +
+          '<button class="save-delete" onclick="event.stopPropagation();deleteSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\',\\'' + escHtml(s.name).replace(/'/g, "\\\\'") + '\\')" title="Delete">✕</button>' +
+          '</div>';
+      }
+      html += '</div></div></div></div></div>';
+    }
+  }
+
+  $('romModalBody').innerHTML = html;
+}
+
+function openRomModal(platform) {
+  if (!romsData) return;
+  openModalPlatform = platform;
+  history.pushState({ modal: 'roms' }, '');
+  renderModalContent(platform);
+  $('romModal').classList.add('open');
+}
+
+function closeRomModal() {
+  if (!$('romModal').classList.contains('open')) return;
+  $('romModal').classList.remove('open');
+  openModalPlatform = null;
+}
+
+window.addEventListener('popstate', (e) => {
+  closeRomModal();
+});
+
+
 
 async function refreshRoms() {
   showToast('Scanning ROMs...');
@@ -1541,6 +1625,7 @@ async function revertSettings() {
 // ── Launch ──
 async function launchRom(platform, filename) {
   if (state.state !== 'idle') { showToast('Dolphin is already running', 'error'); return; }
+  closeRomModal();
   showToast('Launching ' + filename + '...');
   $('stopBtn').disabled = false;
   try {
