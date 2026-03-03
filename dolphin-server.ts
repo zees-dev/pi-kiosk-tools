@@ -9,9 +9,9 @@
  */
 
 import { serve, spawn as bunSpawn, type Subprocess } from "bun";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "fs";
 import { execSync } from "child_process";
-import { join, basename, extname } from "path";
+import { join, basename, extname, relative } from "path";
 
 const PORT = 3460;
 const BASE_DIR = import.meta.dir;
@@ -32,6 +32,30 @@ let dolphinProc: Subprocess | null = null;
 let currentRom: string = "";
 let currentState: DolphinState = "idle";
 let lastError: string = "";
+
+// ── Play History ────────────────────────────────────────────────────────────
+
+const HISTORY_FILE = join(BASE_DIR, "play-history.json");
+
+interface PlayHistory {
+  [filename: string]: { lastPlayed: number; playCount: number };
+}
+
+function loadHistory(): PlayHistory {
+  try {
+    if (existsSync(HISTORY_FILE)) return JSON.parse(readFileSync(HISTORY_FILE, "utf-8"));
+  } catch {}
+  return {};
+}
+
+function recordPlay(filename: string): void {
+  const history = loadHistory();
+  const entry = history[filename] || { lastPlayed: 0, playCount: 0 };
+  entry.lastPlayed = Date.now();
+  entry.playCount++;
+  history[filename] = entry;
+  try { writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2)); } catch {}
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -141,6 +165,110 @@ function scanRoms(): { gamecube: RomEntry[]; wii: RomEntry[] } {
     result[platform].sort((a, b) => a.displayName.localeCompare(b.displayName));
   }
   return result;
+}
+
+// ── Save File Scanner ───────────────────────────────────────────────────────
+
+interface SaveEntry {
+  name: string;
+  path: string;       // relative to DOLPHIN_DIR for API use
+  fullPath: string;
+  type: "gci" | "savestate";
+  gameCode: string;   // 4-char game code (e.g. "GM4E")
+  size: number;
+  sizeFormatted: string;
+  mtime: number;
+  mtimeFormatted: string;
+}
+
+function scanSaves(): SaveEntry[] {
+  const saves: SaveEntry[] = [];
+  const gcDir = join(DOLPHIN_DIR, "GC");
+  const stateDir = join(DOLPHIN_DIR, "StateSaves");
+
+  // Scan GCI files: GC/{region}/Card A/*.gci
+  // GCI filename format: {blocks}-{GAMECODE4}-{title}.gci
+  if (existsSync(gcDir)) {
+    for (const region of readdirSync(gcDir)) {
+      const cardDir = join(gcDir, region, "Card A");
+      if (!existsSync(cardDir)) continue;
+      try {
+        for (const file of readdirSync(cardDir)) {
+          if (!file.endsWith(".gci")) continue;
+          const fullPath = join(cardDir, file);
+          try {
+            const st = statSync(fullPath);
+            if (!st.isFile()) continue;
+            // Parse game code from GCI filename: "64-GM4E-MarioKart Double Dash!!.gci"
+            const match = file.match(/^\d+-([A-Z0-9]{4})-/);
+            const gameCode = match ? match[1] : file.slice(0, 4);
+            saves.push({
+              name: file,
+              path: relative(DOLPHIN_DIR, fullPath),
+              fullPath,
+              type: "gci",
+              gameCode,
+              size: st.size,
+              sizeFormatted: formatSize(st.size),
+              mtime: st.mtimeMs,
+              mtimeFormatted: new Date(st.mtimeMs).toLocaleDateString("en-NZ", {
+                day: "numeric", month: "short", year: "numeric",
+                hour: "2-digit", minute: "2-digit",
+              }),
+            });
+          } catch {}
+        }
+      } catch {}
+    }
+  }
+
+  // Scan save states: StateSaves/GAMEID.s01, .s02, etc.
+  if (existsSync(stateDir)) {
+    try {
+      for (const file of readdirSync(stateDir)) {
+        const fullPath = join(stateDir, file);
+        try {
+          const st = statSync(fullPath);
+          if (!st.isFile()) continue;
+          // Save state filename: GAMEID6.s01 or GAMEID6.sav
+          const gameCode = file.slice(0, 4);
+          saves.push({
+            name: file,
+            path: relative(DOLPHIN_DIR, fullPath),
+            fullPath,
+            type: "savestate",
+            gameCode,
+            size: st.size,
+            sizeFormatted: formatSize(st.size),
+            mtime: st.mtimeMs,
+            mtimeFormatted: new Date(st.mtimeMs).toLocaleDateString("en-NZ", {
+              day: "numeric", month: "short", year: "numeric",
+              hour: "2-digit", minute: "2-digit",
+            }),
+          });
+        } catch {}
+      }
+    } catch {}
+  }
+
+  return saves;
+}
+
+// Read game code from ISO header (first 4 bytes)
+function readGameCode(romPath: string): string | null {
+  try {
+    const ext = extname(romPath).toLowerCase();
+    // Only works for uncompressed ISOs
+    if (ext === ".iso" || ext === ".gcm") {
+      const fd = require("fs").openSync(romPath, "r");
+      const buf = Buffer.alloc(6);
+      require("fs").readSync(fd, buf, 0, 6, 0);
+      require("fs").closeSync(fd);
+      const code = buf.toString("ascii", 0, 4);
+      if (/^[A-Z0-9]{4}$/.test(code)) return code;
+    }
+  } catch {}
+  return null;
 }
 
 // ── INI Parser/Writer ───────────────────────────────────────────────────────
@@ -595,6 +723,7 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
 
     currentState = romPath ? "running" : "dolphin-ui";
     currentRom = romPath ? basename(romPath) : "";
+    if (romPath) recordPlay(basename(romPath));
 
     // Log output
     const readStream = (stream: ReadableStream<Uint8Array> | null, prefix: string) => {
@@ -765,6 +894,18 @@ const HTML = `<!DOCTYPE html>
   .platform-empty { text-align: center; color: #444; padding: 16px; font-size: 13px; background: #141414; border: 1px dashed #282828; border-radius: 8px; margin-bottom: 24px; }
   .platform-empty code { color: #666; font-size: 12px; }
 
+  /* Save files — inside ROM card */
+  .rom-saves { padding: 4px 0 0; margin-top: 6px; }
+  .save-list { display: flex; flex-direction: column; gap: 3px; }
+  .save-item { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; background: #151515; border: 1px solid #222; border-radius: 5px; font-size: 11px; cursor: pointer; transition: all 0.15s; }
+  .save-item:hover { border-color: #333; background: #1e1e1e; }
+  .save-icon { font-size: 12px; flex-shrink: 0; }
+  .save-name { color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+  .save-item:hover .save-name { color: #4a9eff; }
+  .save-meta { color: #555; font-size: 10px; white-space: nowrap; }
+  .save-delete { background: none; border: none; color: #444; cursor: pointer; font-size: 12px; padding: 0 2px; line-height: 1; margin-left: auto; }
+  .save-delete:hover { color: #ff4444; }
+
   /* Collapsible */
   .collapsible { cursor: pointer; user-select: none; display: flex; align-items: center; }
   .collapsible .chevron { font-size: 10px; transition: transform 0.2s; margin-left: auto; }
@@ -882,6 +1023,15 @@ function showToast(msg, type = 'success') {
 
 function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+function timeAgo(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  if (s < 604800) return Math.floor(s / 86400) + 'd ago';
+  return new Date(ts).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short' });
+}
+
 function toggleSection(name) {
   const toggle = $(name + 'Toggle');
   toggle.classList.toggle('open');
@@ -949,6 +1099,7 @@ async function loadRoms() {
 }
 
 function renderRoms(data) {
+  const saves = data.saves || [];
   let html = '';
   for (const [platform, label, icon] of [['gamecube', 'GameCube', '🟣'], ['wii', 'Wii', '⚪']]) {
     const roms = data[platform] || [];
@@ -958,10 +1109,30 @@ function renderRoms(data) {
     } else {
       html += '<div class="rom-list">';
       for (const rom of roms) {
+        // Find saves matching this ROM's game code
+        const romSaves = rom.gameCode ? saves.filter(s => s.gameCode === rom.gameCode) : [];
+        const lastPlayedStr = rom.lastPlayed ? timeAgo(rom.lastPlayed) : '';
         html += '<div class="rom-card" onclick="launchRom(\\'' + escHtml(rom.platform) + '\\',\\'' + escHtml(rom.filename).replace(/'/g, "\\\\'") + '\\')">' +
           '<div class="rom-icon">' + icon + '</div>' +
           '<div class="rom-info"><div class="rom-name">' + escHtml(rom.displayName) + '</div>' +
-          '<div class="rom-meta"><span>' + escHtml(rom.sizeFormatted) + '</span><span>' + escHtml(rom.mtimeFormatted) + '</span></div></div>' +
+          '<div class="rom-meta"><span>' + escHtml(rom.sizeFormatted) + '</span><span>' + escHtml(rom.mtimeFormatted) + '</span>' +
+          (lastPlayedStr ? '<span style="color:#4a9eff">▶ ' + lastPlayedStr + '</span>' : '') +
+          '</div>';
+        // Save files inside the card
+        if (romSaves.length > 0) {
+          html += '<div class="rom-saves"><div class="save-list">';
+          for (const s of romSaves) {
+            const saveIcon = s.type === 'gci' ? '💾' : '📌';
+            html += '<div class="save-item" onclick="event.stopPropagation();downloadSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\')" title="Download: ' + escHtml(s.name) + '">' +
+              '<span class="save-icon">' + saveIcon + '</span>' +
+              '<span class="save-name">' + escHtml(s.name) + '</span>' +
+              '<span class="save-meta">' + escHtml(s.sizeFormatted) + '</span>' +
+              '<button class="save-delete" onclick="event.stopPropagation();deleteSave(\\'' + escHtml(s.path).replace(/'/g, "\\\\'") + '\\',\\'' + escHtml(s.name).replace(/'/g, "\\\\'") + '\\')" title="Delete">✕</button>' +
+              '</div>';
+          }
+          html += '</div></div>';
+        }
+        html += '</div>' +
           '<span class="rom-ext">' + escHtml(rom.ext) + '</span></div>';
       }
       html += '</div>';
@@ -974,6 +1145,28 @@ async function refreshRoms() {
   showToast('Scanning ROMs...');
   await loadRoms();
   showToast('ROMs refreshed');
+}
+
+function downloadSave(path) {
+  window.open('/api/saves/download?path=' + encodeURIComponent(path), '_blank');
+}
+
+async function deleteSave(path, name) {
+  if (!confirm('Delete save file?\\n\\n' + name + '\\n\\nThis cannot be undone.')) return;
+  try {
+    const resp = await fetch('/api/saves/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Deleted: ' + name);
+      loadRoms();
+    } else {
+      showToast(data.error || 'Delete failed', 'error');
+    }
+  } catch { showToast('Request failed', 'error'); }
 }
 
 // ── Launch ──
@@ -1274,9 +1467,33 @@ const server = serve({
       return new Response(HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
-    // API: ROM list
+    // API: ROM list (includes game codes, saves, and play history)
     if (path === "/api/roms" && req.method === "GET") {
-      return Response.json(scanRoms());
+      const roms = scanRoms();
+      const history = loadHistory();
+      // Attach game codes and play history to ROMs
+      for (const platform of ["gamecube", "wii"] as const) {
+        for (const rom of roms[platform]) {
+          const code = readGameCode(rom.path);
+          if (code) (rom as any).gameCode = code;
+          const h = history[rom.filename];
+          if (h) {
+            (rom as any).lastPlayed = h.lastPlayed;
+            (rom as any).playCount = h.playCount;
+          }
+        }
+        // Sort: recently played first (by lastPlayed desc), then alphabetical
+        roms[platform].sort((a, b) => {
+          const aPlayed = (a as any).lastPlayed || 0;
+          const bPlayed = (b as any).lastPlayed || 0;
+          if (aPlayed && !bPlayed) return -1;
+          if (!aPlayed && bPlayed) return 1;
+          if (aPlayed && bPlayed) return bPlayed - aPlayed;
+          return a.displayName.localeCompare(b.displayName);
+        });
+      }
+      const saves = scanSaves();
+      return Response.json({ ...roms, saves });
     }
 
     // API: Status
@@ -1373,6 +1590,51 @@ const server = serve({
           }
         }
         writeSettings(body.changes);
+        return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    // API: Download save file
+    if (path === "/api/saves/download" && req.method === "GET") {
+      const savePath = url.searchParams.get("path");
+      if (!savePath) return Response.json({ error: "Missing path" }, { status: 400 });
+      const fullPath = join(DOLPHIN_DIR, savePath);
+      // Security: ensure path stays within DOLPHIN_DIR
+      if (!fullPath.startsWith(DOLPHIN_DIR) || !existsSync(fullPath)) {
+        return Response.json({ error: "File not found" }, { status: 404 });
+      }
+      const file = Bun.file(fullPath);
+      return new Response(file, {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Disposition": `attachment; filename="${basename(fullPath)}"`,
+        },
+      });
+    }
+
+    // API: Delete save file
+    if (path === "/api/saves/delete" && req.method === "POST") {
+      try {
+        const body = (await req.json()) as { path: string };
+        if (!body.path) return Response.json({ ok: false, error: "Missing path" }, { status: 400 });
+        const fullPath = join(DOLPHIN_DIR, body.path);
+        // Security: ensure path stays within DOLPHIN_DIR and is a save file
+        if (!fullPath.startsWith(DOLPHIN_DIR)) {
+          return Response.json({ ok: false, error: "Invalid path" }, { status: 400 });
+        }
+        if (!existsSync(fullPath)) {
+          return Response.json({ ok: false, error: "File not found" }, { status: 404 });
+        }
+        // Only allow deleting save files (GCI and save states)
+        const ext = extname(fullPath).toLowerCase();
+        const isInGC = fullPath.includes("/GC/");
+        const isInStates = fullPath.includes("/StateSaves/");
+        if (!isInGC && !isInStates) {
+          return Response.json({ ok: false, error: "Can only delete save files" }, { status: 400 });
+        }
+        unlinkSync(fullPath);
         return Response.json({ ok: true });
       } catch (e: any) {
         return Response.json({ ok: false, error: e.message }, { status: 500 });
