@@ -22,7 +22,7 @@ const DOLPHIN_GUI = "/run/current-system/sw/bin/dolphin-emu";
 const SUDO = "/run/wrappers/bin/sudo";
 const CAGE_BIN = "/run/current-system/sw/bin/cage";
 const ENV_BIN = "/run/current-system/sw/bin/env";
-const ROM_EXTENSIONS = new Set([".iso", ".gcm", ".gcz", ".ciso", ".wbfs"]);
+const ROM_EXTENSIONS = new Set([".iso", ".gcm", ".gcz", ".ciso", ".wbfs", ".rvz", ".wia", ".dol", ".elf"]);
 
 // ── Process State ───────────────────────────────────────────────────────────
 
@@ -306,6 +306,227 @@ function cleanupDolphin(): void {
   restartKiosk();
 }
 
+// ── Dynamic Controller Config ───────────────────────────────────────────────
+
+/**
+ * Scan /proc/bus/input/devices for connected gamepads and generate GCPadNew.ini.
+ * Dolphin evdev requires exact device name match — this auto-detects any controller.
+ * Supports up to 4 players. Uses a standard Xbox-like mapping that works for most
+ * controllers (GameSir, DS4, Xbox, Pro Controller, 8BitDo, etc.)
+ */
+function generateGCPadConfig(): void {
+  const inputDevices = readFileSync("/proc/bus/input/devices", "utf-8");
+  const blocks = inputDevices.split("\n\n").filter(Boolean);
+
+  // Find gamepad devices: must have js handler (joystick) and ABS capabilities
+  const gamepads: { name: string; eventHandler: string; jsIndex: number }[] = [];
+
+  for (const block of blocks) {
+    const nameMatch = block.match(/N: Name="(.+?)"/);
+    const handlersMatch = block.match(/H: Handlers=(.+)/);
+    if (!nameMatch || !handlersMatch) continue;
+
+    const name = nameMatch[1];
+    const handlers = handlersMatch[1];
+
+    // Must have js (joystick) handler
+    const jsMatch = handlers.match(/js(\d+)/);
+    if (!jsMatch) continue;
+
+    // Skip virtual/system devices
+    if (name.includes("ydotoold") || name.includes("Virtual Mouse") || name.includes("Consumer Control")) continue;
+
+    const eventMatch = handlers.match(/event(\d+)/);
+    if (!eventMatch) continue;
+
+    gamepads.push({
+      name,
+      eventHandler: `event${eventMatch[1]}`,
+      jsIndex: parseInt(jsMatch[1]),
+    });
+  }
+
+  if (gamepads.length === 0) {
+    console.log("[input] No gamepads detected, keeping existing GCPadNew.ini");
+    return;
+  }
+
+  // Sort by js index for consistent player ordering
+  gamepads.sort((a, b) => a.jsIndex - b.jsIndex);
+
+  interface PadMapping {
+    leftX: number; leftY: number; rightX: number; rightY: number;
+    triggerL: string; triggerR: string; // "Axis N+" or "TL2" (button name)
+    hatX: number; hatY: number;
+  }
+
+  /**
+   * Build sequential axis index map from sysfs ABS capabilities.
+   * Dolphin evdev assigns Axis indices sequentially for each ABS code present
+   * (0 to ABS_MISC=0x28), NOT using raw ABS codes.
+   */
+  function getAxisMapping(eventHandler: string): PadMapping {
+    // Default: assume Xbox-like with ABS_X(0),Y(1),Z(2),RX(3),RY(4),RZ(5),HAT0X(16),HAT0Y(17)
+    const defaults: PadMapping = {
+      leftX: 0, leftY: 1, rightX: 3, rightY: 4,
+      triggerL: "Axis 2+", triggerR: "Axis 5+", hatX: 6, hatY: 7,
+    };
+
+    try {
+      const absLine = readFileSync(`/sys/class/input/${eventHandler}/device/capabilities/abs`, "utf-8").trim();
+      const absBits = BigInt("0x" + absLine.replace(/\s+/g, ""));
+
+      // Build sequential index for each ABS code present (up to ABS_MISC=0x28)
+      const ABS_MISC = 0x28;
+      const codeToIdx: Record<number, number> = {};
+      let idx = 0;
+      for (let code = 0; code < ABS_MISC; code++) {
+        if (absBits & (1n << BigInt(code))) {
+          codeToIdx[code] = idx++;
+        }
+      }
+
+      const ABS_X = 0, ABS_Y = 1, ABS_Z = 2, ABS_RX = 3, ABS_RY = 4, ABS_RZ = 5;
+      const ABS_GAS = 9, ABS_BRAKE = 10, ABS_HAT0X = 16, ABS_HAT0Y = 17;
+
+      const hasRxRy = codeToIdx[ABS_RX] !== undefined && codeToIdx[ABS_RY] !== undefined;
+      const hasZRz = codeToIdx[ABS_Z] !== undefined && codeToIdx[ABS_RZ] !== undefined;
+      const hasGasBrake = codeToIdx[ABS_GAS] !== undefined && codeToIdx[ABS_BRAKE] !== undefined;
+
+      const mapping: PadMapping = {
+        leftX: codeToIdx[ABS_X] ?? 0,
+        leftY: codeToIdx[ABS_Y] ?? 1,
+        hatX: codeToIdx[ABS_HAT0X] ?? 6,
+        hatY: codeToIdx[ABS_HAT0Y] ?? 7,
+        // Defaults overridden below
+        rightX: 0, rightY: 0, triggerL: "TL2", triggerR: "TR2",
+      };
+
+      if (hasRxRy && hasZRz) {
+        // Xbox kernel driver: RX/RY for right stick, Z/RZ for triggers
+        mapping.rightX = codeToIdx[ABS_RX]; mapping.rightY = codeToIdx[ABS_RY];
+        mapping.triggerL = `Axis ${codeToIdx[ABS_Z]}+`; mapping.triggerR = `Axis ${codeToIdx[ABS_RZ]}+`;
+      } else if (hasZRz && hasGasBrake) {
+        // GameSir/some HID: Z/RZ for right stick, GAS/BRAKE for triggers
+        mapping.rightX = codeToIdx[ABS_Z]; mapping.rightY = codeToIdx[ABS_RZ];
+        mapping.triggerL = `Axis ${codeToIdx[ABS_BRAKE]}+`; mapping.triggerR = `Axis ${codeToIdx[ABS_GAS]}+`;
+      } else if (hasRxRy && !hasZRz) {
+        // Nintendo Pro Controller / Switch: RX/RY for right stick, digital-only triggers (buttons)
+        mapping.rightX = codeToIdx[ABS_RX]; mapping.rightY = codeToIdx[ABS_RY];
+        mapping.triggerL = "TL2"; mapping.triggerR = "TR2";
+      } else if (hasZRz) {
+        // Fallback: Z/RZ as right stick, digital triggers
+        mapping.rightX = codeToIdx[ABS_Z]; mapping.rightY = codeToIdx[ABS_RZ];
+        mapping.triggerL = "TL2"; mapping.triggerR = "TR2";
+      } else {
+        return defaults;
+      }
+
+      console.log(`[input] Axis map: ${JSON.stringify(codeToIdx)} → L:${mapping.leftX}/${mapping.leftY} R:${mapping.rightX}/${mapping.rightY} T:${mapping.triggerL}/${mapping.triggerR} H:${mapping.hatX}/${mapping.hatY}`);
+      return mapping;
+    } catch (e: any) {
+      console.log(`[input] Failed to read sysfs for ${eventHandler}, using defaults:`, e.message);
+      return defaults;
+    }
+  }
+
+  // Generate config for up to 4 players.
+  // Dolphin evdev buttons: NamedButton strips BTN_/KEY_ prefix → "SOUTH", "EAST", etc.
+  // Dolphin evdev axes: Sequential index "Axis N+/-" (NOT raw ABS codes).
+  const lines: string[] = [];
+  for (let i = 0; i < Math.min(gamepads.length, 4); i++) {
+    const gp = gamepads[i];
+    const ax = getAxisMapping(gp.eventHandler);
+
+    lines.push(`[GCPad${i + 1}]`);
+    lines.push(`Device = evdev/${i}/${gp.name}`);
+    // GC A = East face button, GC B = South, GC X = North, GC Y = West
+    lines.push(`Buttons/A = \`EAST\``);
+    lines.push(`Buttons/B = \`SOUTH\``);
+    lines.push(`Buttons/X = \`NORTH\``);
+    lines.push(`Buttons/Y = \`WEST\``);
+    lines.push(`Buttons/Z = \`TR\``);
+    lines.push(`Buttons/Start = \`START\``);
+    lines.push(`Main Stick/Up = \`Axis ${ax.leftY}-\``);
+    lines.push(`Main Stick/Down = \`Axis ${ax.leftY}+\``);
+    lines.push(`Main Stick/Left = \`Axis ${ax.leftX}-\``);
+    lines.push(`Main Stick/Right = \`Axis ${ax.leftX}+\``);
+    lines.push(`Main Stick/Modifier/Range = 50.0`);
+    lines.push(`Main Stick/Dead Zone = 15.0`);
+    lines.push(`C-Stick/Up = \`Axis ${ax.rightY}-\``);
+    lines.push(`C-Stick/Down = \`Axis ${ax.rightY}+\``);
+    lines.push(`C-Stick/Left = \`Axis ${ax.rightX}-\``);
+    lines.push(`C-Stick/Right = \`Axis ${ax.rightX}+\``);
+    lines.push(`C-Stick/Dead Zone = 15.0`);
+    lines.push(`Triggers/L = \`${ax.triggerL}\``);
+    lines.push(`Triggers/R = \`${ax.triggerR}\``);
+    lines.push(`Triggers/L-Analog = \`${ax.triggerL}\``);
+    lines.push(`Triggers/R-Analog = \`${ax.triggerR}\``);
+    lines.push(`D-Pad/Up = \`Axis ${ax.hatY}-\``);
+    lines.push(`D-Pad/Down = \`Axis ${ax.hatY}+\``);
+    lines.push(`D-Pad/Left = \`Axis ${ax.hatX}-\``);
+    lines.push(`D-Pad/Right = \`Axis ${ax.hatX}+\``);
+    lines.push(``);
+
+    console.log(`[input] GCPad${i + 1} → ${gp.name} (${gp.eventHandler}, js${gp.jsIndex})`);
+  }
+
+  const configPath = join(DOLPHIN_DIR, "Config", "GCPadNew.ini");
+  writeFileSync(configPath, lines.join("\n") + "\n");
+  console.log(`[input] Generated GCPadNew.ini for ${Math.min(gamepads.length, 4)} controller(s)`);
+
+  // Also generate WiimoteNew.ini for Wii games (emulated Wiimote + Nunchuk)
+  const wiiLines: string[] = [];
+  for (let i = 0; i < Math.min(gamepads.length, 4); i++) {
+    const gp = gamepads[i];
+    const ax = getAxisMapping(gp.eventHandler);
+
+    wiiLines.push(`[Wiimote${i + 1}]`);
+    wiiLines.push(`Device = evdev/${i}/${gp.name}`);
+    // Wiimote buttons
+    wiiLines.push(`Buttons/A = \`SOUTH\``);
+    wiiLines.push(`Buttons/B = \`EAST\``);
+    wiiLines.push(`Buttons/- = \`SELECT\``);
+    wiiLines.push(`Buttons/+ = \`START\``);
+    wiiLines.push(`Buttons/Home = \`MODE\``);
+    wiiLines.push(`Buttons/1 = \`NORTH\``);
+    wiiLines.push(`Buttons/2 = \`WEST\``);
+    // D-Pad on hat
+    wiiLines.push(`D-Pad/Up = \`Axis ${ax.hatY}-\``);
+    wiiLines.push(`D-Pad/Down = \`Axis ${ax.hatY}+\``);
+    wiiLines.push(`D-Pad/Left = \`Axis ${ax.hatX}-\``);
+    wiiLines.push(`D-Pad/Right = \`Axis ${ax.hatX}+\``);
+    // IR pointer on right stick
+    wiiLines.push(`IR/Up = \`Axis ${ax.rightY}-\``);
+    wiiLines.push(`IR/Down = \`Axis ${ax.rightY}+\``);
+    wiiLines.push(`IR/Left = \`Axis ${ax.rightX}-\``);
+    wiiLines.push(`IR/Right = \`Axis ${ax.rightX}+\``);
+    // Shake on bumpers
+    wiiLines.push(`Shake/X = \`TL\``);
+    wiiLines.push(`Shake/Y = \`TL\``);
+    wiiLines.push(`Shake/Z = \`TL\``);
+    // Nunchuk extension
+    wiiLines.push(`Extension = Nunchuk`);
+    wiiLines.push(`Nunchuk/Buttons/C = \`${ax.triggerL}\``);
+    wiiLines.push(`Nunchuk/Buttons/Z = \`${ax.triggerR}\``);
+    wiiLines.push(`Nunchuk/Stick/Up = \`Axis ${ax.leftY}-\``);
+    wiiLines.push(`Nunchuk/Stick/Down = \`Axis ${ax.leftY}+\``);
+    wiiLines.push(`Nunchuk/Stick/Left = \`Axis ${ax.leftX}-\``);
+    wiiLines.push(`Nunchuk/Stick/Right = \`Axis ${ax.leftX}+\``);
+    wiiLines.push(`Nunchuk/Stick/Dead Zone = 15.0`);
+    wiiLines.push(`Nunchuk/Shake/X = \`TR\``);
+    wiiLines.push(`Nunchuk/Shake/Y = \`TR\``);
+    wiiLines.push(`Nunchuk/Shake/Z = \`TR\``);
+    wiiLines.push(``);
+
+    console.log(`[input] Wiimote${i + 1} → ${gp.name} (emulated + Nunchuk)`);
+  }
+
+  const wiiConfigPath = join(DOLPHIN_DIR, "Config", "WiimoteNew.ini");
+  writeFileSync(wiiConfigPath, wiiLines.join("\n") + "\n");
+  console.log(`[input] Generated WiimoteNew.ini for ${Math.min(gamepads.length, 4)} controller(s)`);
+}
+
 async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: string }> {
   if (currentState !== "idle") {
     return { ok: false, error: `Dolphin is already ${currentState === "running" ? "running a game" : "in GUI mode"}` };
@@ -327,6 +548,13 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
   }
 
   lastError = "";
+
+  // Auto-detect connected controllers and generate GCPadNew.ini
+  try {
+    generateGCPadConfig();
+  } catch (e: any) {
+    console.log("[input] Failed to generate controller config:", e.message);
+  }
 
   // Stop kiosk (frees the DRM seat for Cage)
   try {

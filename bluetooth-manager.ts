@@ -25,6 +25,20 @@ function saveTags(tags: Record<string, string>) {
   writeFileSync(TAGS_FILE, JSON.stringify(tags, null, 2));
 }
 
+// Device name history (tracks all names seen per MAC address)
+const NAMES_FILE = join(import.meta.dir, "device-names.json");
+
+function loadDeviceNames(): Record<string, string[]> {
+  try {
+    if (existsSync(NAMES_FILE)) return JSON.parse(readFileSync(NAMES_FILE, "utf-8"));
+  } catch {}
+  return {};
+}
+
+function saveDeviceNames(names: Record<string, string[]>) {
+  writeFileSync(NAMES_FILE, JSON.stringify(names, null, 2));
+}
+
 import { join } from "path";
 
 // D-Bus connection (lazy initialized)
@@ -275,6 +289,9 @@ async function listDevices() {
     const objectManager = await getObjectManager();
     const objects = await objectManager.GetManagedObjects();
     const devices: any[] = [];
+    const tags = loadTags();
+    const deviceNames = loadDeviceNames();
+    let namesUpdated = false;
     
     for (const [path, interfaces] of Object.entries(objects) as any) {
       if (path.startsWith("/org/bluez/hci0/dev_") && interfaces["org.bluez.Device1"]) {
@@ -302,11 +319,18 @@ async function listDevices() {
         const isConnected = device.Connected?.value || false;
         const inputActive = isGamepad && isConnected ? await hasInputDevice(address) : false;
         
-        const tags = loadTags();
+        // Track name history for this MAC
+        if (!deviceNames[address]) deviceNames[address] = [];
+        if (name && !deviceNames[address].includes(name)) {
+          deviceNames[address].push(name);
+          namesUpdated = true;
+        }
+
         devices.push({
           path,
           address,
           name,
+          knownNames: deviceNames[address] || [name],
           tag: tags[address] || null,
           paired: device.Paired?.value || false,
           trusted: device.Trusted?.value || false,
@@ -321,6 +345,7 @@ async function listDevices() {
       }
     }
     
+    if (namesUpdated) saveDeviceNames(deviceNames);
     return { devices };
   } catch (error: any) {
     return { error: error.message, devices: [] };
@@ -711,32 +736,63 @@ const indexHtml = `<!DOCTYPE html>
     .device-name {
       font-weight: 600;
       font-size: 1rem;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+    }
+    .device-aliases {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      margin-top: 2px;
+    }
+    .device-aliases .alias {
+      font-size: 0.7rem;
+      color: #555;
     }
     .device-address {
       font-size: 0.8rem;
       color: #888;
       font-family: monospace;
     }
-    .device-tag {
-      font-size: 0.7rem;
-      color: #777;
-      font-style: italic;
-      margin-top: 2px;
+    .tag-row {
+      align-self: flex-end;
     }
+    .tag-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      background: rgba(79, 195, 247, 0.15);
+      border: 1px solid rgba(79, 195, 247, 0.3);
+      color: #4fc3f7;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 0.7rem;
+      font-weight: 500;
+      cursor: pointer;
+      max-width: 150px;
+    }
+    .tag-pill:hover { background: rgba(79, 195, 247, 0.25); }
+    .tag-pill .tag-text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tag-pill .tag-x {
+      font-size: 0.65rem;
+      opacity: 0.5;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .tag-pill .tag-x:hover { opacity: 1; }
     .tag-btn {
       background: transparent;
       border: 1px solid #444;
-      border-radius: 4px;
+      border-radius: 10px;
       color: #555;
-      padding: 1px 5px;
+      padding: 2px 8px;
       font-size: 0.65rem;
       min-width: auto;
       flex: none;
-      vertical-align: middle;
-      display: inline;
+      width: auto;
+      display: inline-block;
       cursor: pointer;
     }
     .tag-btn:hover { color: #aaa; border-color: #666; background: transparent; transform: none; }
@@ -1113,10 +1169,19 @@ const indexHtml = `<!DOCTYPE html>
       const paired = data.devices.filter(d => d.paired);
       const available = data.devices.filter(d => !d.paired);
       
-      // Sort paired: connected first, then by name
-      paired.sort((a, b) => {
-        if (a.connected !== b.connected) return b.connected - a.connected;
-        return (a.name || '').localeCompare(b.name || '');
+      // Group paired by MAC prefix (first 3 octets — same physical device in different modes)
+      const macGroups = {};
+      for (const d of paired) {
+        const prefix = d.address.split(':').slice(0, 3).join(':');
+        if (!macGroups[prefix]) macGroups[prefix] = [];
+        macGroups[prefix].push(d);
+      }
+      const pairedGroups = Object.values(macGroups);
+      pairedGroups.sort((a, b) => {
+        const aConn = a.some(d => d.connected);
+        const bConn = b.some(d => d.connected);
+        if (aConn !== bConn) return bConn - aConn;
+        return ((a.find(d => d.connected) || a[0]).name || '').localeCompare(((b.find(d => d.connected) || b[0]).name || ''));
       });
       
       // Sort available: by signal strength, then name
@@ -1128,32 +1193,41 @@ const indexHtml = `<!DOCTYPE html>
       });
       
       // Show/hide paired section
-      pairedSection.style.display = paired.length > 0 ? 'block' : 'none';
+      pairedSection.style.display = pairedGroups.length > 0 ? 'block' : 'none';
       
-      // Render paired devices
-      pairedEl.innerHTML = paired.length === 0 
+      // Render paired device groups
+      pairedEl.innerHTML = pairedGroups.length === 0 
         ? '<div class="empty">No paired devices</div>'
-        : paired.map(d => {
-          const isCharging = d.battery && (d.battery.status === 'Charging' || d.battery.status === 'Full');
+        : pairedGroups.map(group => {
+          const primary = group.find(d => d.connected) || group[0];
+          const allNames = [...new Set(group.flatMap(d => d.knownNames || [d.name]))];
+          const altNames = allNames.filter(n => n !== primary.name);
+          const tag = group.find(d => d.tag)?.tag || null;
+          const allAddrs = group.map(d => d.address).join(',');
+          const allPaths = group.map(d => d.path).join(',');
+          const isCharging = primary.battery && (primary.battery.status === 'Charging' || primary.battery.status === 'Full');
           return \`
-          <div class="device\${isCharging ? ' device-charging' : ''}" data-path="\${d.path}">
+          <div class="device\${isCharging ? ' device-charging' : ''}" data-path="\${primary.path}" data-addrs="\${allAddrs}" data-paths="\${allPaths}">
             <div class="device-info">
-              <div class="device-name">\${d.name} <button class="tag-btn" onclick="event.stopPropagation();editTag('\${d.address}', this)">\${d.tag ? '✏️' : '🏷️'}</button></div>
-              <div class="device-address">\${d.address}</div>
-              \${d.tag ? \`<div class="device-tag">\${d.tag}</div>\` : ''}
+              <div class="device-name">\${primary.name}</div>
+              \${altNames.length > 0 ? \`<div class="device-aliases">\${altNames.map(n => \`<span class="alias">\${n}</span>\`).join('')}</div>\` : ''}
+              <div class="device-address">\${primary.address}\${group.length > 1 ? \` <span style="color:#555;font-size:0.7rem">(+\${group.length - 1} mode\${group.length > 2 ? 's' : ''})</span>\` : ''}</div>
               <div class="device-status">
-                \${d.connected ? '<span class="badge connected">Connected</span>' : '<span class="badge" style="background:#666">Disconnected</span>'}
-                \${d.connected && d.inputActive ? '<span class="badge" style="background:#2e7d32">🎮 Input Active</span>' : ''}
-                \${d.connected && !d.inputActive && d.icon === 'input-gaming' ? '<span class="badge" style="background:#c62828">⚠ No Input</span>' : ''}
-                <span class="badge \${d.trusted ? 'trusted' : ''}" style="\${d.trusted ? '' : 'background:#555;'} cursor:pointer;" onclick="event.stopPropagation();toggleTrust('\${d.path}', \${!d.trusted})">\${d.trusted ? 'Auto-connect' : 'No auto-connect'}</span>
+                \${primary.connected ? '<span class="badge connected">Connected</span>' : '<span class="badge" style="background:#666">Disconnected</span>'}
+                \${primary.connected && primary.inputActive ? '<span class="badge" style="background:#2e7d32">🎮 Input Active</span>' : ''}
+                \${primary.connected && !primary.inputActive && primary.icon === 'input-gaming' ? \`<span class="badge" style="background:#c62828;cursor:pointer" onclick="event.stopPropagation();reconnectDevice('\${primary.path}')">⚠ No Input — tap to fix</span>\` : ''}
+                <span class="badge \${primary.trusted ? 'trusted' : ''}" style="\${primary.trusted ? '' : 'background:#555;'} cursor:pointer;" onclick="event.stopPropagation();toggleTrust('\${primary.path}', \${!primary.trusted})">\${primary.trusted ? 'Auto-connect' : 'No auto-connect'}</span>
               </div>
             </div>
             <div class="device-right">
-              \${d.connected && (d.rssi != null || d.battery) ? \`<div class="device-signal">\${d.rssi != null ? \`<span class="badge rssi-pill">\${renderSignalBars(d.rssi)} \${d.rssi} dBm</span>\` : ''}\${d.battery ? \`<span class="badge rssi-pill">\${renderBattery(d.battery)}</span>\` : ''}</div>\` : ''}
+              <div class="tag-row">
+                \${tag ? \`<span class="tag-pill" onclick="editTag(this)"><span class="tag-text">\${tag}</span><span class="tag-x" onclick="event.stopPropagation();removeTag(this)">×</span></span>\` : \`<button class="tag-btn" onclick="editTag(this)">🏷️</button>\`}
+              </div>
+              \${primary.connected && (primary.rssi != null || primary.battery) ? \`<div class="device-signal">\${primary.rssi != null ? \`<span class="badge rssi-pill">\${renderSignalBars(primary.rssi)} \${primary.rssi} dBm</span>\` : ''}\${primary.battery ? \`<span class="badge rssi-pill">\${renderBattery(primary.battery)}</span>\` : ''}</div>\` : ''}
               <div class="device-actions">
-                \${!d.connected ? \`<button class="success" onclick="connectDevice('\${d.path}')">Connect</button>\` : ''}
-                \${d.connected ? \`<button class="secondary" onclick="disconnectDevice('\${d.path}')">Disconnect</button>\` : ''}
-                <button class="danger" onclick="forgetDevice('\${d.path}')">Forget</button>
+                \${!primary.connected ? \`<button class="success" onclick="connectDevice('\${primary.path}')">Connect</button>\` : ''}
+                \${primary.connected ? \`<button class="secondary" onclick="disconnectDevice('\${primary.path}')">Disconnect</button>\` : ''}
+                <button class="danger" onclick="forgetDevice('\${allPaths}')">Forget</button>
               </div>
             </div>
           </div>
@@ -1244,6 +1318,14 @@ const indexHtml = `<!DOCTYPE html>
       if (res.error) alert('Disconnect failed: ' + res.error);
       await refreshDevices();
     }
+
+    async function reconnectDevice(path) {
+      await api('/device/disconnect', 'POST', { path });
+      await new Promise(r => setTimeout(r, 1500));
+      const res = await api('/device/connect', 'POST', { path });
+      if (res.error) alert('Reconnect failed: ' + res.error);
+      await refreshDevices();
+    }
     
     async function removeDevice(path) {
       if (!confirm('Remove this device? It will need to be paired again.')) return;
@@ -1252,21 +1334,26 @@ const indexHtml = `<!DOCTYPE html>
       await refreshDevices();
     }
     
-    async function forgetDevice(path) {
+    async function forgetDevice(pathsStr) {
+      const paths = pathsStr.split(',');
       // Remove from DOM immediately for responsive feel
-      const deviceEl = document.querySelector('[data-path="' + path + '"]');
+      const deviceEl = document.querySelector('[data-path="' + paths[0] + '"]');
       if (deviceEl) {
         deviceEl.style.opacity = '0.3';
         deviceEl.style.pointerEvents = 'none';
       }
       
-      const res = await api('/device/forget', 'POST', { path });
-      if (res.error) {
-        alert('Forget failed: ' + res.error);
-        if (deviceEl) { deviceEl.style.opacity = '1'; deviceEl.style.pointerEvents = ''; }
-      } else {
-        if (deviceEl) deviceEl.remove();
+      let failed = false;
+      for (const path of paths) {
+        const res = await api('/device/forget', 'POST', { path });
+        if (res.error) {
+          alert('Forget failed: ' + res.error);
+          failed = true;
+          break;
+        }
       }
+      if (failed && deviceEl) { deviceEl.style.opacity = '1'; deviceEl.style.pointerEvents = ''; }
+      else if (deviceEl) deviceEl.remove();
       await refreshDevices();
     }
     
@@ -1276,21 +1363,30 @@ const indexHtml = `<!DOCTYPE html>
       await refreshDevices();
     }
 
-    // Tag editing
-    function editTag(address, btn) {
-      const device = btn.closest('.device');
-      const existing = device.querySelector('.device-tag');
-      const current = existing ? existing.textContent : '';
-      btn.outerHTML = \`<input class="tag-input" type="text" value="\${current}" placeholder="e.g. P1 Controller" 
-        onblur="saveTag('\${address}', this)" 
+    // Tag editing (works with grouped devices via data-addrs)
+    function editTag(el) {
+      const device = el.closest('.device');
+      const tagRow = device.querySelector('.tag-row');
+      const textEl = tagRow.querySelector('.tag-text');
+      const current = textEl ? textEl.textContent : '';
+      const addrs = device.dataset.addrs;
+      tagRow.innerHTML = \`<input class="tag-input" type="text" value="\${current}" placeholder="e.g. P1 Controller" 
+        onblur="saveTag('\${addrs}', this)" 
         onkeydown="if(event.key==='Enter')this.blur();if(event.key==='Escape'){this.dataset.cancel='1';this.blur()}">\`;
-      device.querySelector('.tag-input').focus();
+      tagRow.querySelector('.tag-input').focus();
     }
     
-    async function saveTag(address, input) {
+    async function saveTag(addrsStr, input) {
       if (input.dataset.cancel) { await refreshDevices(); return; }
       const tag = input.value.trim();
-      await api('/device/tag', 'POST', { address, tag });
+      const addresses = addrsStr.split(',');
+      await api('/device/tag', 'POST', { addresses, tag });
+      await refreshDevices();
+    }
+    
+    async function removeTag(el) {
+      const addrs = el.closest('.device').dataset.addrs.split(',');
+      await api('/device/tag', 'POST', { addresses: addrs, tag: '' });
       await refreshDevices();
     }
     
@@ -1421,16 +1517,16 @@ const server = serve({
       },
     },
     
-    // API: Tag device
+    // API: Tag device (supports single address or array for grouped devices)
     "/api/device/tag": {
       async POST(req) {
-        const { address, tag } = await req.json();
-        if (!address) return Response.json({ error: "Address required" });
+        const { address, addresses, tag } = await req.json();
+        const addrs = addresses || (address ? [address] : []);
+        if (!addrs.length) return Response.json({ error: "Address required" });
         const tags = loadTags();
-        if (tag) {
-          tags[address] = tag;
-        } else {
-          delete tags[address];
+        for (const addr of addrs) {
+          if (tag) tags[addr] = tag;
+          else delete tags[addr];
         }
         saveTags(tags);
         return Response.json({ success: true, tag: tag || null });
