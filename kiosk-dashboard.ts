@@ -853,8 +853,9 @@ const HTML = `<!DOCTYPE html>
     <button class="modal-close" id="sysClose">✕</button>
     <h2>System Info</h2>
     <div id="sysCards"></div>
+    <div id="svcsSection"></div>
+    <div id="sysCards2"></div>
     <div id="portsSection" style="margin-top:8px"></div>
-    <div id="svcsSection" style="margin-top:8px"></div>
   </div>
 </div>
 
@@ -987,7 +988,7 @@ const statusText = $('statusText');
 const currentUrl = $('currentUrl');
 
 let apps = [];
-let history = [];
+let navHistory = [];
 let toastTimer = null;
 // ── System Diagnostics UI ──
 function valClass(val, warnAt, dangerAt) {
@@ -1037,9 +1038,8 @@ function renderSysCards(sys) {
   html += sysCard('RAM', (sys.memory.usedMb / 1024).toFixed(1) + ' / ' + (sys.memory.totalMb / 1024).toFixed(1) + ' GB');
   html += sysCard('Swap', sys.swap.totalMb > 0 ? (sys.swap.usedMb / 1024).toFixed(1) + ' / ' + (sys.swap.totalMb / 1024).toFixed(1) + ' GB' : '<span class="off">None</span>');
 
-  // Storage + Processes
+  // Storage
   html += sysCard('Storage', sys.disk.used + ' / ' + sys.disk.total + ' (' + sys.disk.percent + '%)');
-  html += sysCard('Processes', sys.processes);
 
   // HDMI + Audio
   html += sysCard('HDMI', sys.hdmi.connected ? '<span class="ok">' + (sys.hdmi.resolution || 'Connected') + '</span>' : '<span class="off">Disconnected</span>');
@@ -1059,13 +1059,17 @@ function renderSysCards(sys) {
   html += sysCard('Kernel', sys.kernel);
   html += sysCard('NixOS', 'Gen ' + sys.nixos.generation + (sys.nixos.date ? ' · ' + sys.nixos.date : ''));
 
-  // Docker
-  if (sys.containers.length) {
-    html += sysWide('Docker', sys.containers.map(c => escHtml(c.name) + ' <span class="ok">' + escHtml(c.status) + '</span>').join('<br>'));
-  }
-
   html += '</div>';
   $('sysCards').innerHTML = html;
+
+  // Processes + Docker in sysCards2 (below services)
+  let html2 = '<div class="sys-grid">';
+  html2 += sysCard('Processes', sys.processes);
+  if (sys.containers.length) {
+    html2 += sysWide('Docker', sys.containers.map(c => escHtml(c.name) + ' <span class="ok">' + escHtml(c.status) + '</span>').join('<br>'));
+  }
+  html2 += '</div>';
+  $('sysCards2').innerHTML = html2;
 }
 
 // ── Ports (cached, only re-renders on change) ──
@@ -1131,19 +1135,27 @@ async function loadSystem() {
 }
 
 let svcsPoll = null;
+window.addEventListener('popstate', () => {
+  closeSysModal();
+  closeRiModal();
+  closeAvModal();
+});
+
 function openSysModal() {
+  history.pushState({ modal: 'sys' }, '');
   $('sysModal').classList.add('open');
   loadSystem();
   loadServices();
   svcsPoll = setInterval(loadServices, 5000);
 }
 function closeSysModal() {
+  if (!$('sysModal').classList.contains('open')) return;
   $('sysModal').classList.remove('open');
   if (svcsPoll) { clearInterval(svcsPoll); svcsPoll = null; }
 }
 $('statusBar').onclick = openSysModal;
-$('sysClose').onclick = closeSysModal;
-$('sysModal').onclick = (e) => { if (e.target === $('sysModal')) closeSysModal(); };
+$('sysClose').onclick = () => history.back();
+$('sysModal').onclick = (e) => { if (e.target === $('sysModal')) history.back(); };
 
 function showToast(msg, type = 'success') {
   toast.textContent = msg;
@@ -1345,7 +1357,7 @@ function isFavourited(url) { return favourites.some(f => f.url === url); }
 
 function renderHistory() {
   const query = urlInput.value.trim();
-  const filtered = query ? history.filter(h => fuzzyMatch(query, h.url) || fuzzyMatch(query, h.title)) : history;
+  const filtered = query ? navHistory.filter(h => fuzzyMatch(query, h.url) || fuzzyMatch(query, h.title)) : navHistory;
 
   if (filtered.length === 0) {
     historyList.innerHTML = '<li class="empty">' + (query ? 'No matches' : 'No recent history') + '</li>';
@@ -1355,7 +1367,7 @@ function renderHistory() {
   historyList.innerHTML = '';
   for (let i = 0; i < filtered.length; i++) {
     const h = filtered[i];
-    const origIdx = history.indexOf(h);
+    const origIdx = navHistory.indexOf(h);
     const faved = isFavourited(h.url);
     const li = document.createElement('li');
     li.className = 'history-item';
@@ -1394,8 +1406,8 @@ async function loadApps() {
 async function loadHistory() {
   try {
     const resp = await fetch('/api/history');
-    history = await resp.json();
-  } catch { history = []; }
+    navHistory = await resp.json();
+  } catch { navHistory = []; }
   renderHistory();
 }
 
@@ -1480,23 +1492,34 @@ function riConnect() {
 
 // Open/close
 let riNavPoll = null;
-$('remoteBtn').onclick = () => {
+function openRiModal() {
+  history.pushState({ modal: 'ri' }, '');
   $('riOverlay').classList.add('open');
   if (!riWs) riConnect();
   updateNavState();
   riNavPoll = setInterval(updateNavState, 2000);
-};
-$('riClose').onclick = () => {
+}
+function closeRiModal() {
+  if (!$('riOverlay').classList.contains('open')) return;
   $('riOverlay').classList.remove('open');
   if (riNavPoll) { clearInterval(riNavPoll); riNavPoll = null; }
-};
+}
+$('remoteBtn').onclick = openRiModal;
+$('riClose').onclick = () => history.back();
 
 // ── Display & Audio modal ──
-$('avBtn').onclick = () => { $('avModal').classList.add('open'); loadAudioSettings(); };
-
-
-$('avClose').onclick = () => { $('avModal').classList.remove('open'); };
-$('avModal').onclick = (e) => { if (e.target === $('avModal')) $('avModal').classList.remove('open'); };
+function openAvModal() {
+  history.pushState({ modal: 'av' }, '');
+  $('avModal').classList.add('open');
+  loadAudioSettings();
+}
+function closeAvModal() {
+  if (!$('avModal').classList.contains('open')) return;
+  $('avModal').classList.remove('open');
+}
+$('avBtn').onclick = openAvModal;
+$('avClose').onclick = () => history.back();
+$('avModal').onclick = (e) => { if (e.target === $('avModal')) history.back(); };
 
 async function loadAudioSettings() {
   try {
