@@ -728,7 +728,9 @@ function flush() { net.send(buttons, lx, ly, rx, ry, l2, r2, gpVendor); }
 const badge = document.getElementById('playerBadge');
 const dot = document.getElementById('connDot');
 net.onAssign(p => { badge.textContent = 'P' + p; badge.className = 'player-badge p' + p; });
-net.onState(s => { dot.className = 'conn-dot ' + s; });
+net.onState(s => {
+  dot.className = 'conn-dot ' + s;
+});
 
 // ═══════════════════════════════════════════════════════════════
 // TOUCH UI — buttons, sticks, triggers
@@ -885,6 +887,21 @@ window.addEventListener('gamepaddisconnected', () => {});
 // Prevent zoom/scroll
 document.addEventListener('touchmove', e => e.preventDefault(), {passive:false});
 if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(()=>{});
+// Screen Wake Lock (requires HTTPS secure context)
+let _wakeLock = null;
+async function requestWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    if (_wakeLock) return;
+    _wakeLock = await navigator.wakeLock.request('screen');
+    _wakeLock.addEventListener('release', () => { _wakeLock = null; });
+  } catch {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') requestWakeLock();
+});
+// Acquire immediately — no user gesture needed for Wake Lock API
+requestWakeLock();
 </script>
 </body>
 </html>`;
@@ -1103,8 +1120,19 @@ refreshHwGrid();
 </html>`;
 
 // ── Server ──────────────────────────────────────────────────────────────
+// TLS — reuse retrobox certs for secure context (Wake Lock API requires HTTPS)
+const CERT_DIR = "/home/pi/retrobox/certs";
+let tlsOpts: { cert?: string; key?: string } = {};
+try {
+  tlsOpts = {
+    cert: readFileSync(join(CERT_DIR, "cert.pem"), "utf-8"),
+    key: readFileSync(join(CERT_DIR, "key.pem"), "utf-8"),
+  };
+} catch { console.log("⚠ No TLS certs found, running HTTP only"); }
+
 const server = Bun.serve({
   port: PORT,
+  ...(tlsOpts.cert ? { tls: tlsOpts } : {}),
   fetch(req, server) {
     const url = new URL(req.url);
     const path = url.pathname;
@@ -1120,6 +1148,12 @@ const server = Bun.serve({
     }
 
     if (path === "/health") return Response.json({ status: "ok" });
+    if (path === "/deps/nosleep.min.js") {
+      try {
+        const ns = readFileSync(join(BASE_DIR, "deps", "nosleep.min.js"));
+        return new Response(ns, { headers: { "Content-Type": "application/javascript", "Cache-Control": "public, max-age=86400" } });
+      } catch { return new Response("Not found", { status: 404 }); }
+    }
     if (path === "/debug") {
       const hw = Array.from(hwControllers.values()).map(h => ({
         name: h.name, eventPath: h.eventPath,
@@ -1209,6 +1243,7 @@ const server = Bun.serve({
   },
 });
 
-console.log(`🎮 Virtual Gamepad server on http://${getIP()}:${PORT}`);
-console.log(`   Controller: http://${getIP()}:${PORT}/`);
-console.log(`   Kiosk view: http://${getIP()}:${PORT}/view`);
+const proto = tlsOpts.cert ? 'https' : 'http';
+console.log(`🎮 Virtual Gamepad server on ${proto}://${getIP()}:${PORT}`);
+console.log(`   Controller: ${proto}://${getIP()}:${PORT}/`);
+console.log(`   Kiosk view: ${proto}://${getIP()}:${PORT}/view`);

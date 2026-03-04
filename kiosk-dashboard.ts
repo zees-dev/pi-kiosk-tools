@@ -374,7 +374,7 @@ function getApps(): App[] {
     { id: "wifi", name: "WiFi Manager", icon: "📶", url: `http://${ip}:3457`, description: "Network settings", diagnosticsUrl: `http://${ip}:3457/api/diagnostics` },
     { id: "bluetooth", name: "Bluetooth", icon: "🔵", url: `http://${ip}:3456`, description: "Controller pairing", diagnosticsUrl: `http://${ip}:3456/api/diagnostics` },
     { id: "remotepad", name: "RemotePad", icon: "🎮", url: `http://${ip}:3458`, description: "PS4 controller bridge", diagnosticsUrl: `http://${ip}:3458/api/diagnostics` },
-    { id: "virtualpad", name: "Virtual Pad", icon: "🎮", url: `http://${ip}:3461/view`, description: "Web-based game controller" },
+    { id: "virtualpad", name: "Virtual Pad", icon: "🎮", url: `https://${ip}:3461/view`, description: "Web-based game controller" },
     { id: "vnc", name: "VNC", icon: "📺", url: `http://${ip}:6080/vnc.html?host=${ip}&port=6080&autoconnect=true&resize=scale&quality=6&show_dot=true&view_clip=true`, description: "View kiosk display remotely", external: true },
   );
   return apps;
@@ -1261,7 +1261,7 @@ function renderApps(kioskUrl) {
     const diagHtml = app.action ? '' : formatDiag(app, diagCache[app.id]);
     let ctrlHtml = '';
     if (!isDisabled && app.id === 'retrobox') ctrlHtml = '<a class="open-link" href="https://' + location.hostname + ':3334/controller.html?screen=127-0-0-1" target="_blank" title="Controller" onclick="event.stopPropagation()">⊞</a>';
-    if (!isDisabled && app.id === 'virtualpad') ctrlHtml = '<a class="open-link" href="http://' + location.hostname + ':3461/" target="_blank" title="Open controller" onclick="event.stopPropagation()">🎮</a>';
+    if (!isDisabled && app.id === 'virtualpad') ctrlHtml = '<a class="open-link" href="https://' + location.hostname + ':3461/" target="_blank" title="Open controller" onclick="event.stopPropagation()">🎮</a>';
     const linkHtml = (!isDisabled && app.url) ? '<a class="open-link" href="' + app.url + '" target="_blank" title="Open in browser">↗</a>' : '';
     card.innerHTML = '<div class="icon">' + app.icon + '</div><div class="app-info"><div class="name">' + app.name + '</div><div class="desc">' + app.description + '</div></div>' + diagHtml + ctrlHtml + linkHtml;
     if (isDisabled) {
