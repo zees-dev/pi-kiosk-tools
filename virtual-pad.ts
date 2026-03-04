@@ -32,6 +32,18 @@ const ABS_X = 0, ABS_Y = 1, ABS_Z = 2, ABS_RX = 3, ABS_RY = 4, ABS_RZ = 5;
 const ABS_HAT0X = 0x10, ABS_HAT0Y = 0x11;
 const EVENT_SIZE = 24; // aarch64: timeval(16) + type(2) + code(2) + value(4)
 
+// ── Vendor config (single source of truth) ──────────────────────────────
+// Controllers are identified by USB vendor ID. Add new vendors here.
+// swapFace: Nintendo layout has A/B and X/Y in opposite positions to Xbox
+interface VendorConfig { swapFace: boolean }
+const VENDORS: Record<number, VendorConfig> = {
+  0x054c: { swapFace: false }, // Sony (PlayStation)
+  0x057e: { swapFace: true },  // Nintendo
+};
+function getVendorConfig(vid: number): VendorConfig {
+  return VENDORS[vid] || { swapFace: false };
+}
+
 const BUTTON_MAP: [number, number][] = [
   [0, BTN_SOUTH], [1, BTN_EAST], [2, BTN_WEST], [3, BTN_NORTH],
   [4, BTN_TL], [5, BTN_TR], [6, BTN_TL2], [7, BTN_TR2],
@@ -151,7 +163,6 @@ interface HwController {
   type: string; // bluetooth | usb
   eventPath: string;
   eventNum: number;
-  isNintendo: boolean;
   vendorId: number;
   // Axis calibration
   absInfo: Map<number, { min: number; max: number }>;
@@ -264,7 +275,8 @@ function hwStateToProtocol(hw: HwController): void {
   // Xbox/GameSir X-input: A=bottom(SOUTH), B=right(EAST), X=top(NORTH), Y=left(WEST)
   //   → SOUTH→A(0), EAST→B(1), NORTH→X(2), WEST→Y(3)
   let buttons = 0;
-  const btnMap: [number, number][] = hw.isNintendo ? [
+  const vcfg = getVendorConfig(hw.vendorId);
+  const btnMap: [number, number][] = vcfg.swapFace ? [
     [BTN_EAST, 0], [BTN_SOUTH, 1], [BTN_NORTH, 2], [BTN_WEST, 3],
     [BTN_TL, 4], [BTN_TR, 5], [BTN_TL2, 6], [BTN_TR2, 7],
     [BTN_SELECT, 8], [BTN_START, 9], [BTN_THUMBL, 10], [BTN_THUMBR, 11],
@@ -414,8 +426,7 @@ function scanAndUpdateHw() {
       // Detect controller brand by vendor
       const vendorStr = (get("I: ").match(/Vendor=(\w+)/)?.[1] || "").toLowerCase();
       const vendorId = parseInt(vendorStr, 16) || 0;
-      const isNintendo = vendorId === 0x057e;
-      found.set(eventPath, { name, type, eventNum, isNintendo, vendorId });
+      found.set(eventPath, { name, type, eventNum, vendorId });
     }
   } catch {}
 
@@ -427,7 +438,7 @@ function scanAndUpdateHw() {
       state[4] = state[5] = state[6] = state[7] = 128; // center sticks
       const hw: HwController = {
         name: info.name, type: info.type, eventPath: path, eventNum: info.eventNum,
-        isNintendo: info.isNintendo, vendorId: info.vendorId, absInfo, state, stream: null,
+        vendorId: info.vendorId, absInfo, state, stream: null,
         rawButtons: new Set(), rawAxes: new Map(),
       };
       hwControllers.set(path, hw);
@@ -778,6 +789,14 @@ setupStick('stickR','thumbR',true,11);
 // ═══════════════════════════════════════════════════════════════
 let gpPrevB = 0, gpPrevA = [128,128,128,128,0,0];
 
+// ── Vendor config (single source of truth) ──
+// Add new controller brands here — everything else derives from this
+const VENDOR_CFG = {
+  0x054c: { type: 'playstation', face: { 0: '✕', 1: '○', 2: '□', 3: '△' }, swapFace: false },
+  0x057e: { type: 'nintendo',    face: { 0: 'A', 1: 'B', 2: 'X', 3: 'Y' }, swapFace: true },
+};
+const XBOX_FACE = { 0: 'A', 1: 'B', 2: 'X', 3: 'Y' };
+
 function getVendorId(gp) {
   const id = gp.id || '';
   const m = id.match(/Vendor:\\s*([0-9a-fA-F]{4})/i);
@@ -789,42 +808,26 @@ function getVendorId(gp) {
   return 0;
 }
 
-function vendorToType(v) {
-  if (v === 0x057e) return 'nintendo';
-  if (v === 0x054c) return 'playstation';
-  return 'xbox';
-}
-
-const FACE_LABELS = {
-  xbox:        { 0: 'A', 1: 'B', 2: 'X', 3: 'Y' },
-  nintendo:    { 0: 'A', 1: 'B', 2: 'X', 3: 'Y' },
-  playstation: { 0: '✕', 1: '○', 2: '□', 3: '△' },
-};
 // URL override: ?labels=xbox|ps|nintendo
 const qp = new URLSearchParams(location.search);
 const labelsOverride = qp.get('labels') || qp.get('l') || '';
-const LABELS_MAP = { ps: 'playstation', playstation: 'playstation', nintendo: 'nintendo', xbox: 'xbox' };
-let currentGpType = LABELS_MAP[labelsOverride] || 'xbox';
-// Apply override immediately if set
-if (LABELS_MAP[labelsOverride]) {
-  const labels = FACE_LABELS[currentGpType];
-  for (const [bit, label] of Object.entries(labels)) {
-    const el = document.querySelector('[data-btn="' + bit + '"]');
-    if (el) el.textContent = label;
-  }
-}
+const OVERRIDE_VENDORS = { ps: 0x054c, playstation: 0x054c, nintendo: 0x057e, xbox: 0 };
+let currentVendor = -1; // force first apply
 
+// Apply face labels from vendor config
 function applyFaceLabels(vendor) {
-  if (LABELS_MAP[labelsOverride]) return; // manual override — skip auto-detect
-  const type = vendorToType(vendor);
-  if (type === currentGpType) return;
-  currentGpType = type;
-  const labels = FACE_LABELS[type];
-  for (const [bit, label] of Object.entries(labels)) {
+  if (OVERRIDE_VENDORS[labelsOverride] !== undefined) vendor = OVERRIDE_VENDORS[labelsOverride];
+  if (vendor === currentVendor) return;
+  currentVendor = vendor;
+  const cfg = VENDOR_CFG[vendor];
+  const face = cfg ? cfg.face : XBOX_FACE;
+  for (const [bit, label] of Object.entries(face)) {
     const el = document.querySelector('[data-btn="' + bit + '"]');
     if (el) el.textContent = label;
   }
 }
+// Apply immediately (defaults to xbox unless overridden)
+applyFaceLabels(0);
 
 function pollGamepad() {
   const gps = navigator.getGamepads ? navigator.getGamepads() : [];
@@ -837,8 +840,8 @@ function pollGamepad() {
     gpVendor = getVendorId(gp);
     applyFaceLabels(gpVendor);
 
-    // Nintendo: standard mapping is positional — swap A↔B (bits 0,1) and X↔Y (bits 2,3)
-    if (gpVendor === 0x057e) {
+    // Swap face buttons if vendor config says so (Nintendo layout)
+    if (VENDOR_CFG[gpVendor]?.swapFace) {
       const a = (gb >> 0) & 1, b = (gb >> 1) & 1, x = (gb >> 2) & 1, y = (gb >> 3) & 1;
       gb = (gb & ~0xF) | (b << 0) | (a << 1) | (y << 2) | (x << 3);
     }
@@ -961,12 +964,13 @@ const VIEW_HTML = `<!DOCTYPE html>
 const $ = id => document.getElementById(id);
 $('hostAddr').textContent = location.host;
 
+// Vendor → full button label set. Add new vendors here.
 const VENDOR_LABELS = {
   0x054c: {0:'✕',1:'○',2:'□',3:'△',4:'L1',5:'R1',6:'L2',7:'R2',8:'SHR',9:'OPT',10:'L3',11:'R3',12:'↑',13:'↓',14:'←',15:'→',16:'PS'},
   0x057e: {0:'A',1:'B',2:'X',3:'Y',4:'L',5:'R',6:'ZL',7:'ZR',8:'-',9:'+',10:'L3',11:'R3',12:'↑',13:'↓',14:'←',15:'→',16:'⊙'},
 };
-const XBOX_LABELS = {0:'A',1:'B',2:'X',3:'Y',4:'LB',5:'RB',6:'LT',7:'RT',8:'SEL',9:'STR',10:'L3',11:'R3',12:'↑',13:'↓',14:'←',15:'→',16:'⊙'};
-function getBtnNames(vendor) { return VENDOR_LABELS[vendor] || XBOX_LABELS; }
+const DEFAULT_LABELS = {0:'A',1:'B',2:'X',3:'Y',4:'LB',5:'RB',6:'LT',7:'RT',8:'SEL',9:'STR',10:'L3',11:'R3',12:'↑',13:'↓',14:'←',15:'→',16:'⊙'};
+function getBtnNames(vendor) { return VENDOR_LABELS[vendor] || DEFAULT_LABELS; }
 
 // Parse 10-byte state array into usable object
 function parseState(s) {
