@@ -1148,12 +1148,6 @@ const server = Bun.serve({
     }
 
     if (path === "/health") return Response.json({ status: "ok" });
-    if (path === "/deps/nosleep.min.js") {
-      try {
-        const ns = readFileSync(join(BASE_DIR, "deps", "nosleep.min.js"));
-        return new Response(ns, { headers: { "Content-Type": "application/javascript", "Cache-Control": "public, max-age=86400" } });
-      } catch { return new Response("Not found", { status: 404 }); }
-    }
     if (path === "/debug") {
       const hw = Array.from(hwControllers.values()).map(h => ({
         name: h.name, eventPath: h.eventPath,
