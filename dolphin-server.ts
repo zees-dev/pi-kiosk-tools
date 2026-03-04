@@ -29,16 +29,19 @@ const ROM_EXTENSIONS = new Set([".iso", ".gcm", ".gcz", ".ciso", ".wbfs", ".rvz"
 // instead of direct hardware controllers. This allows hotplugging controllers
 // at any time, even during gameplay.
 const HOTPLUG_FILE = join(BASE_DIR, "dolphin-hotplug.json");
-let hotplugMode = true; // default on
+let hotplugMode = false; // default off
+let virtualPadsEnabled = true; // when hotplug off, add virtual gamepads for remaining slots
 
 try {
   if (existsSync(HOTPLUG_FILE)) {
-    hotplugMode = JSON.parse(readFileSync(HOTPLUG_FILE, "utf-8")).enabled ?? true;
+    const cfg = JSON.parse(readFileSync(HOTPLUG_FILE, "utf-8"));
+    hotplugMode = cfg.enabled ?? true;
+    virtualPadsEnabled = cfg.virtualPads ?? true;
   }
 } catch {}
 
 function saveHotplugMode() {
-  writeFileSync(HOTPLUG_FILE, JSON.stringify({ enabled: hotplugMode }) + "\n");
+  writeFileSync(HOTPLUG_FILE, JSON.stringify({ enabled: hotplugMode, virtualPads: virtualPadsEnabled }) + "\n");
 }
 
 // ── Process State ───────────────────────────────────────────────────────────
@@ -108,8 +111,8 @@ function savePrevSettings(settings: Record<string, string>): void {
 }
 
 // Snapshot all current settings as a flat key=value map
-function snapshotSettings(): Record<string, string> {
-  const s = readSettings();
+async function snapshotSettings(): Promise<Record<string, string>> {
+  const s = await readSettings();
   const snap: Record<string, string> = {};
   for (const [k, v] of Object.entries(s.gfx)) snap["gfx." + k] = v;
   for (const [k, v] of Object.entries(s.dolphin)) snap["dolphin." + k] = v;
@@ -603,21 +606,64 @@ interface Settings {
   }[];
 }
 
-function readSettings(): Settings {
+async function readSettings(): Promise<Settings> {
   const gfx = readIniFile("GFX.ini");
   const dolphin = readIniFile("Dolphin.ini");
   const gcpad = readIniFile("GCPadNew.ini");
 
-  // Parse controllers
+  // Parse controllers — when hotplug off, scan live hardware; when on, show INI config
   const controllers: Settings["controllers"] = [];
-  for (let i = 1; i <= 4; i++) {
-    const sec = gcpad.sections.find((s) => s.name === `GCPad${i}`);
-    if (!sec) continue;
-    const device = sec.entries.find((e) => e.type === "kv" && e.key === "Device")?.value || "Not configured";
-    const buttonCount = sec.entries.filter(
-      (e) => e.type === "kv" && e.key !== "Device" && e.key !== undefined
-    ).length;
-    controllers.push({ player: i, device, buttonCount });
+  if (!hotplugMode) {
+    let player = 1;
+    try {
+      const inputDevices = readFileSync("/proc/bus/input/devices", "utf-8");
+      const blocks = inputDevices.split("\n\n").filter(Boolean);
+      for (const block of blocks) {
+        if (player > 4) break;
+        const nameMatch = block.match(/N: Name="(.+?)"/);
+        const handlersMatch = block.match(/H: Handlers=(.+)/);
+        if (!nameMatch || !handlersMatch) continue;
+        const name = nameMatch[1];
+        const handlers = handlersMatch[1];
+        if (!handlers.match(/js\d+/)) continue;
+        if (name.includes("ydotoold") || name.includes("Virtual Mouse") || name.includes("Consumer Control") || name.includes("Virtual Gamepad")) continue;
+        const keyMatch = block.match(/B: KEY=(.+)/);
+        const btnCount = keyMatch ? keyMatch[1].split(/\s+/).length * 16 : 0; // rough estimate
+        controllers.push({ player: player++, device: name, buttonCount: btnCount });
+      }
+    } catch {}
+    // Add connected virtual gamepads when enabled
+    if (virtualPadsEnabled) {
+      try {
+        const vpResp = await fetch("https://127.0.0.1:3461/debug", { signal: AbortSignal.timeout(1000), tls: { rejectUnauthorized: false } });
+        const vpData = await vpResp.json() as { slots: { slot: number; connected: boolean }[] };
+        const hwPlayers = controllers.map(c => c.player);
+        let nextPlayer = player;
+        for (const s of vpData.slots) {
+          if (s.connected) {
+            // Assign web controllers to next available player slot (after hardware)
+            controllers.push({ player: nextPlayer, device: `Virtual Gamepad ${s.slot}`, buttonCount: 25 });
+            nextPlayer++;
+            if (nextPlayer > 4) break;
+          }
+        }
+      } catch {
+        // Virtual pad server unavailable — show remaining as potential slots
+        for (let i = player; i <= 4; i++) {
+          controllers.push({ player: i, device: `Virtual Gamepad ${i}`, buttonCount: 25 });
+        }
+      }
+    }
+  } else {
+    for (let i = 1; i <= 4; i++) {
+      const sec = gcpad.sections.find((s) => s.name === `GCPad${i}`);
+      if (!sec) continue;
+      const device = sec.entries.find((e) => e.type === "kv" && e.key === "Device")?.value || "Not configured";
+      const buttonCount = sec.entries.filter(
+        (e) => e.type === "kv" && e.key !== "Device" && e.key !== undefined
+      ).length;
+      controllers.push({ player: i, device, buttonCount });
+    }
   }
 
   return {
@@ -658,6 +704,7 @@ function readSettings(): Settings {
     },
     controllers,
     hotplugMode,
+    virtualPadsEnabled,
   };
 }
 
@@ -963,14 +1010,85 @@ function generateGCPadConfig(): void {
     console.log(`[input] GCPad${i + 1} → ${gp.name} (${gp.eventHandler}, js${gp.jsIndex})`);
   }
 
+  // Add virtual gamepads for remaining slots when enabled
+  const hwCount = Math.min(gamepads.length, 4);
+  if (virtualPadsEnabled && hwCount < 4) {
+    for (let i = hwCount; i < 4; i++) {
+      const devName = `Virtual Gamepad ${i + 1}`;
+      lines.push(`[GCPad${i + 1}]`);
+      lines.push(`Device = evdev/0/${devName}`);
+      lines.push(`Buttons/A = \`EAST\``);
+      lines.push(`Buttons/B = \`SOUTH\``);
+      lines.push(`Buttons/X = \`NORTH\``);
+      lines.push(`Buttons/Y = \`WEST\``);
+      lines.push(`Buttons/Z = \`TR\``);
+      lines.push(`Buttons/Start = \`START\``);
+      lines.push(`Main Stick/Up = \`Axis 1-\``);
+      lines.push(`Main Stick/Down = \`Axis 1+\``);
+      lines.push(`Main Stick/Left = \`Axis 0-\``);
+      lines.push(`Main Stick/Right = \`Axis 0+\``);
+      lines.push(`Main Stick/Dead Zone = 15.0`);
+      lines.push(`C-Stick/Up = \`Axis 4-\``);
+      lines.push(`C-Stick/Down = \`Axis 4+\``);
+      lines.push(`C-Stick/Left = \`Axis 3-\``);
+      lines.push(`C-Stick/Right = \`Axis 3+\``);
+      lines.push(`C-Stick/Dead Zone = 15.0`);
+      lines.push(`Triggers/L = \`Axis 2+\``);
+      lines.push(`Triggers/R = \`Axis 5+\``);
+      lines.push(`Triggers/L-Analog = \`Axis 2+\``);
+      lines.push(`Triggers/R-Analog = \`Axis 5+\``);
+      lines.push(`D-Pad/Up = \`Axis 7-\``);
+      lines.push(`D-Pad/Down = \`Axis 7+\``);
+      lines.push(`D-Pad/Left = \`Axis 6-\``);
+      lines.push(`D-Pad/Right = \`Axis 6+\``);
+      lines.push(``);
+
+      wiiLines.push(`[Wiimote${i + 1}]`);
+      wiiLines.push(`Device = evdev/0/${devName}`);
+      wiiLines.push(`Buttons/A = \`SOUTH\``);
+      wiiLines.push(`Buttons/B = \`EAST\``);
+      wiiLines.push(`Buttons/- = \`SELECT\``);
+      wiiLines.push(`Buttons/+ = \`START\``);
+      wiiLines.push(`Buttons/Home = \`MODE\``);
+      wiiLines.push(`Buttons/1 = \`NORTH\``);
+      wiiLines.push(`Buttons/2 = \`WEST\``);
+      wiiLines.push(`D-Pad/Up = \`Axis 7-\``);
+      wiiLines.push(`D-Pad/Down = \`Axis 7+\``);
+      wiiLines.push(`D-Pad/Left = \`Axis 6-\``);
+      wiiLines.push(`D-Pad/Right = \`Axis 6+\``);
+      wiiLines.push(`IR/Up = \`Axis 4-\``);
+      wiiLines.push(`IR/Down = \`Axis 4+\``);
+      wiiLines.push(`IR/Left = \`Axis 3-\``);
+      wiiLines.push(`IR/Right = \`Axis 3+\``);
+      wiiLines.push(`Shake/X = \`TL\``);
+      wiiLines.push(`Shake/Y = \`TL\``);
+      wiiLines.push(`Shake/Z = \`TL\``);
+      wiiLines.push(`Extension = Nunchuk`);
+      wiiLines.push(`Nunchuk/Buttons/C = \`Axis 2+\``);
+      wiiLines.push(`Nunchuk/Buttons/Z = \`Axis 5+\``);
+      wiiLines.push(`Nunchuk/Stick/Up = \`Axis 1-\``);
+      wiiLines.push(`Nunchuk/Stick/Down = \`Axis 1+\``);
+      wiiLines.push(`Nunchuk/Stick/Left = \`Axis 0-\``);
+      wiiLines.push(`Nunchuk/Stick/Right = \`Axis 0+\``);
+      wiiLines.push(`Nunchuk/Stick/Dead Zone = 15.0`);
+      wiiLines.push(`Nunchuk/Shake/X = \`TR\``);
+      wiiLines.push(`Nunchuk/Shake/Y = \`TR\``);
+      wiiLines.push(`Nunchuk/Shake/Z = \`TR\``);
+      wiiLines.push(``);
+
+      console.log(`[input] GCPad${i + 1}/Wiimote${i + 1} → ${devName} (web controller)`);
+    }
+  }
+
+  const totalPads = virtualPadsEnabled ? 4 : hwCount;
   const configPath = join(DOLPHIN_DIR, "Config", "GCPadNew.ini");
   writeFileSync(configPath, lines.join("\n") + "\n");
-  console.log(`[input] Generated GCPadNew.ini for ${Math.min(gamepads.length, 4)} controller(s)`);
+  console.log(`[input] Generated GCPadNew.ini for ${totalPads} controller(s) (${hwCount} hw + ${totalPads - hwCount} virtual)`);
 
   // Ensure SI ports are enabled for detected controllers
   const dolphinIni = readIniFile("Dolphin.ini");
   const siChanges: { file: string; section: string; key: string; value: string }[] = [];
-  for (let i = 0; i < Math.min(gamepads.length, 4); i++) {
+  for (let i = 0; i < totalPads; i++) {
     const current = getIniValue(dolphinIni, "Core", `SIDevice${i}`);
     if (current !== "6") {
       siChanges.push({ file: "Dolphin.ini", section: "Core", key: `SIDevice${i}`, value: "6" });
@@ -1030,7 +1148,6 @@ function generateGCPadConfig(): void {
 
   const wiiConfigPath = join(DOLPHIN_DIR, "Config", "WiimoteNew.ini");
   writeFileSync(wiiConfigPath, wiiLines.join("\n") + "\n");
-  console.log(`[input] Generated WiimoteNew.ini for ${Math.min(gamepads.length, 4)} controller(s)`);
 }
 
 async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: string }> {
@@ -1440,6 +1557,17 @@ const HTML = `<!DOCTYPE html>
         <input type="checkbox" id="hotplugToggle" onchange="toggleHotplug(this.checked)" style="display:none">
         <span style="position:absolute;inset:0;background:#333;border-radius:11px;transition:0.2s"></span>
         <span style="position:absolute;top:2px;left:2px;width:18px;height:18px;background:#666;border-radius:50%;transition:0.2s" id="hotplugKnob"></span>
+      </label>
+    </div>
+    <div id="virtualPadsRow" style="display:none;align-items:center;justify-content:space-between;margin-bottom:12px;padding:8px 12px;background:#1a1a1a;border-radius:8px;border:1px solid #282828">
+      <div>
+        <div style="font-size:13px;color:#ccc">Virtual Controllers</div>
+        <div style="font-size:11px;color:#666;margin-top:2px">Add web-based controllers for remaining player slots</div>
+      </div>
+      <label style="position:relative;width:40px;height:22px;cursor:pointer">
+        <input type="checkbox" id="virtualPadsToggle" onchange="toggleVirtualPads(this.checked)" style="display:none">
+        <span style="position:absolute;inset:0;background:#333;border-radius:11px;transition:0.2s"></span>
+        <span style="position:absolute;top:2px;left:2px;width:18px;height:18px;background:#666;border-radius:50%;transition:0.2s" id="virtualPadsKnob"></span>
       </label>
     </div>
     <div id="controllersList"></div>
@@ -1882,6 +2010,23 @@ async function loadSettings() {
     settings = await resp.json();
     renderSettings();
     renderControllers();
+    // Start/stop controller polling based on hotplug mode
+    if (settings.hotplugMode) {
+      if (window._ctrlPoll) { clearInterval(window._ctrlPoll); window._ctrlPoll = null; }
+    } else if (!window._ctrlPoll) {
+      window._ctrlPoll = setInterval(pollControllers, 1500);
+    }
+  } catch {}
+}
+
+async function pollControllers() {
+  try {
+    const resp = await fetch('/api/settings', { signal: AbortSignal.timeout(1500) });
+    const s = await resp.json();
+    if (JSON.stringify(s.controllers) !== JSON.stringify(settings.controllers)) {
+      settings.controllers = s.controllers;
+      renderControllers();
+    }
   } catch {}
 }
 
@@ -2119,6 +2264,19 @@ function renderControllers() {
     knob.parentElement.querySelector('span').style.background = isHotplug ? '#1a3a5c' : '#333';
   }
 
+  // Update virtual pads toggle (only visible when hotplug is off)
+  const vpRow = $('virtualPadsRow');
+  const vpToggle = $('virtualPadsToggle');
+  const vpKnob = $('virtualPadsKnob');
+  const isVP = settings.virtualPadsEnabled;
+  if (vpRow) vpRow.style.display = isHotplug ? 'none' : 'flex';
+  if (vpToggle) vpToggle.checked = isVP;
+  if (vpKnob) {
+    vpKnob.style.left = isVP ? '20px' : '2px';
+    vpKnob.style.background = isVP ? '#4a9eff' : '#666';
+    vpKnob.parentElement.querySelector('span').style.background = isVP ? '#1a3a5c' : '#333';
+  }
+
   if (isHotplug) {
     $('ctrlCount').textContent = '(hotplug)';
     $('controllersList').innerHTML = '<div class="platform-empty" style="color:#4a9eff">🔌 Dynamic mode — controllers can be connected anytime.<br><span style="color:#666;font-size:11px">Uses Virtual Gamepad passthrough via the Virtual Pad service.</span></div>';
@@ -2153,6 +2311,25 @@ async function toggleHotplug(enabled) {
     const data = await resp.json();
     if (data.ok) {
       showToast(enabled ? 'Hotplug mode enabled' : 'Hotplug mode disabled');
+      loadSettings();
+    } else {
+      showToast(data.error || 'Failed', 'error');
+    }
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
+}
+
+async function toggleVirtualPads(enabled) {
+  try {
+    const resp = await fetch('/api/hotplug', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ virtualPads: enabled })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast(enabled ? 'Virtual controllers enabled' : 'Virtual controllers disabled');
       loadSettings();
     } else {
       showToast(data.error || 'Failed', 'error');
@@ -2296,7 +2473,7 @@ const server = serve({
 
     // API: Get settings
     if (path === "/api/settings" && req.method === "GET") {
-      return Response.json(readSettings());
+      return Response.json(await readSettings());
     }
 
     // API: Save settings
@@ -2384,7 +2561,7 @@ const server = serve({
         profiles.push({
           name: body.name || "Profile " + (profiles.length + 1),
           createdAt: Date.now(),
-          settings: snapshotSettings(),
+          settings: await snapshotSettings(),
         });
         saveProfiles(profiles);
         return Response.json({ ok: true });
@@ -2402,7 +2579,7 @@ const server = serve({
           return Response.json({ ok: false, error: "Invalid profile index" }, { status: 400 });
         }
         // Backup current before applying
-        savePrevSettings(snapshotSettings());
+        savePrevSettings(await snapshotSettings());
         applySnapshot(profiles[body.index].settings);
         return Response.json({ ok: true });
       } catch (e: any) {
@@ -2429,7 +2606,7 @@ const server = serve({
     // API: Backup current settings (called before save)
     if (path === "/api/settings/backup" && req.method === "POST") {
       try {
-        savePrevSettings(snapshotSettings());
+        savePrevSettings(await snapshotSettings());
         return Response.json({ ok: true });
       } catch (e: any) {
         return Response.json({ ok: false, error: e.message }, { status: 500 });
@@ -2455,14 +2632,15 @@ const server = serve({
     // API: Hotplug mode
     if (path === "/api/hotplug") {
       if (req.method === "GET") {
-        return Response.json({ enabled: hotplugMode });
+        return Response.json({ enabled: hotplugMode, virtualPads: virtualPadsEnabled });
       }
       if (req.method === "POST") {
         try {
-          const body = await req.json() as { enabled: boolean };
-          hotplugMode = !!body.enabled;
+          const body = await req.json() as { enabled?: boolean; virtualPads?: boolean };
+          if (body.enabled !== undefined) hotplugMode = !!body.enabled;
+          if (body.virtualPads !== undefined) virtualPadsEnabled = !!body.virtualPads;
           saveHotplugMode();
-          return Response.json({ ok: true, enabled: hotplugMode });
+          return Response.json({ ok: true, enabled: hotplugMode, virtualPads: virtualPadsEnabled });
         } catch (e: any) {
           return Response.json({ ok: false, error: e.message }, { status: 400 });
         }
