@@ -125,10 +125,19 @@ async function doRegisterAgent() {
       RequestPasskey(device: string) { assertPairingAllowed(device, "RequestPasskey"); return 0; }
       DisplayPasskey(_device: string, _passkey: number, _entered: number) {}
       RequestConfirmation(device: string, passkey: number) {
+        // Allow trusted devices to reconnect without UI initiation
+        if (isTrustedDevice(device)) {
+          console.log(`[agent] Auto-confirmed TRUSTED ${device} (${passkey})`);
+          return;
+        }
         assertPairingAllowed(device, "RequestConfirmation");
         console.log(`[agent] Confirmed ${device} (${passkey})`);
       }
       RequestAuthorization(device: string) {
+        if (isTrustedDevice(device)) {
+          console.log(`[agent] Auto-authorized TRUSTED ${device}`);
+          return;
+        }
         assertPairingAllowed(device, "RequestAuthorization");
         console.log(`[agent] Authorized ${device}`);
       }
@@ -238,6 +247,10 @@ async function setDiscovery(start: boolean) {
     if (start) {
       // Discoverable so controllers can see us, but NOT pairable (only during explicit pair)
       await props.Set("org.bluez.Adapter1", "Discoverable", new DBus.Variant("b", true));
+      // Scan both BR/EDR and BLE — some controllers (GameSir) advertise on BLE in pairing mode
+      try {
+        await adapter.SetDiscoveryFilter({ Transport: new DBus.Variant("s", "auto") });
+      } catch {}
       await adapter.StartDiscovery();
     } else {
       await adapter.StopDiscovery();
@@ -487,6 +500,27 @@ async function pairDevice(devicePath: string) {
       await new Promise(r => setTimeout(r, 1000));
     }
 
+    // Step 4b: If no input device, disconnect and reconnect to rebind HID profile
+    if (!hasInput && connected) {
+      console.log(`  ⚡ No input — disconnect+reconnect to rebind HID...`);
+      try { await device.Disconnect(); } catch {}
+      await new Promise(r => setTimeout(r, 1500));
+      try {
+        await device.Connect();
+        await new Promise(r => setTimeout(r, 2000));
+        connected = (await props.Get("org.bluez.Device1", "Connected")).value;
+      } catch (e: any) {
+        console.log(`  Reconnect failed: ${e.message}`);
+      }
+      // Wait again for input
+      for (let i = 0; i < 5; i++) {
+        hasInput = await hasInputDevice(address);
+        if (hasInput) break;
+        console.log(`  Waiting for input after reconnect... (${i + 1}/5)`);
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+
     // Step 5: Disable SNIFF for game controllers
     let icon = "device";
     try { icon = (await props.Get("org.bluez.Device1", "Icon")).value; } catch {}
@@ -511,14 +545,9 @@ async function pairDevice(devicePath: string) {
     return { error: error.message };
   } finally {
     pairingInProgress.delete(devicePath);
-    // Disable pairable after pairing completes (prevents unsolicited re-pairing)
-    try {
-      const { dbus: bus } = await getDBus();
-      const DBusM = await import("dbus-next");
-      const aObj = await bus.getProxyObject("org.bluez", "/org/bluez/hci0");
-      const aProps = aObj.getInterface("org.freedesktop.DBus.Properties");
-      await aProps.Set("org.bluez.Adapter1", "Pairable", new DBusM.Variant("b", false));
-    } catch {}
+    // Keep Pairable enabled — the agent gates untrusted devices.
+    // Disabling Pairable prevents trusted controllers from reconnecting
+    // on some firmware that re-authenticates on wake.
   }
 }
 
@@ -1570,6 +1599,55 @@ registerAgent().catch(err => console.error("[agent] Startup registration failed:
 async function startBtOptimizer() {
   const { execSync, exec: execCb } = await import("child_process");
   
+  // When a controller reconnects (ACL up), BlueZ may fail to auto-connect HID
+  // because it tries A2DP first (GameSir advertises audio UUIDs).
+  // Fix: explicitly connect the HID profile if no input device appears.
+  async function ensureHidProfile(address: string) {
+    try {
+      // Check if input device already exists
+      const { readFileSync } = await import("fs");
+      const devices = readFileSync("/proc/bus/input/devices", "utf-8");
+      if (devices.toLowerCase().includes(address.toLowerCase())) return; // Already has input
+
+      // Check if device has HID UUID and is connected
+      const info = execSync(`bluetoothctl info ${address} 2>/dev/null`, { timeout: 2000, encoding: "utf-8" });
+      if (!/Connected: yes/i.test(info)) return;
+      if (!/00001124/i.test(info)) return; // No HID UUID
+
+      console.log(`[bt-opt] ${address}: connected but no input — connecting HID profile...`);
+      const devPath = `/org/bluez/hci0/dev_${address.replace(/:/g, "_")}`;
+      execSync(`dbus-send --system --print-reply --dest=org.bluez ${devPath} org.bluez.Device1.ConnectProfile string:"00001124-0000-1000-8000-00805f9b34fb"`, { timeout: 5000 });
+
+      // Verify
+      await new Promise(r => setTimeout(r, 1500));
+      const devicesAfter = readFileSync("/proc/bus/input/devices", "utf-8");
+      if (devicesAfter.toLowerCase().includes(address.toLowerCase())) {
+        console.log(`[bt-opt] ${address}: ✓ HID input device created`);
+      } else {
+        console.log(`[bt-opt] ${address}: ⚠ HID ConnectProfile succeeded but no input device`);
+      }
+    } catch (e: any) {
+      console.log(`[bt-opt] ${address}: HID connect failed: ${e.message}`);
+    }
+  }
+
+  // Check ALL connected gaming devices for missing HID input
+  async function ensureHidForAllConnected() {
+    try {
+      const conns = execSync("hcitool con 2>/dev/null", { timeout: 2000, encoding: "utf-8" });
+      for (const line of conns.split("\n")) {
+        const addrMatch = line.match(/([0-9A-F]{2}:){5}[0-9A-F]{2}/i);
+        if (!addrMatch) continue;
+        const addr = addrMatch[0];
+        try {
+          const info = execSync(`bluetoothctl info ${addr} 2>/dev/null`, { timeout: 1500, encoding: "utf-8" });
+          if (!/Icon:\s*input-gaming/i.test(info)) continue;
+          await ensureHidProfile(addr);
+        } catch {}
+      }
+    } catch {}
+  }
+
   function disableSniffForGamepads() {
     try {
       const conns = execSync("hcitool con 2>/dev/null", { timeout: 2000, encoding: "utf-8" });
@@ -1604,8 +1682,9 @@ async function startBtOptimizer() {
       buffer += data.toString();
       if (buffer.includes("Connected") && buffer.includes("true")) {
         buffer = "";
-        // Brief delay for connection to stabilize, then disable SNIFF
+        // A device just connected — disable SNIFF and ensure HID for ALL connected gaming devices
         setTimeout(disableSniffForGamepads, 500);
+        setTimeout(ensureHidForAllConnected, 1500);
       }
       // Prevent buffer from growing unbounded
       if (buffer.length > 4096) buffer = buffer.slice(-1024);
