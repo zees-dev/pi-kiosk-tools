@@ -143,6 +143,8 @@ function applySnapshot(snap: Record<string, string>): void {
     "dolphin.fastmem": { file: "Dolphin.ini", section: "Core", key: "Fastmem" },
     "dolphin.mmu": { file: "Dolphin.ini", section: "Core", key: "MMU" },
     "dolphin.fprf": { file: "Dolphin.ini", section: "Core", key: "FPRF" },
+    "dolphin.cpuThread": { file: "Dolphin.ini", section: "Core", key: "CPUThread" },
+    "dolphin.syncGpuOnSkipIdle": { file: "Dolphin.ini", section: "Core", key: "SyncGPUOnSkipIdleHack" },
     "dolphin.audioStretching": { file: "Dolphin.ini", section: "Core", key: "AudioStretch" },
     "dolphin.emulationSpeed": { file: "Dolphin.ini", section: "Core", key: "EmulationSpeed" },
   };
@@ -573,8 +575,10 @@ interface Settings {
     overclock: string;
     // Performance
     dspHle: string;
+    cpuThread: string;
     skipIdle: string;
     syncGpu: string;
+    syncGpuOnSkipIdle: string;
     fastmem: string;
     mmu: string;
     fprf: string;
@@ -631,8 +635,10 @@ function readSettings(): Settings {
       overclock: getIniValue(dolphin, "Core", "Overclock") ?? "1.0",
       // Performance
       dspHle: getIniValue(dolphin, "Core", "DSPHLE") ?? "True",
+      cpuThread: getIniValue(dolphin, "Core", "CPUThread") ?? "True",
       skipIdle: getIniValue(dolphin, "Core", "SkipIdle") ?? "True",
-      syncGpu: getIniValue(dolphin, "Core", "SyncGPU") ?? "True",
+      syncGpu: getIniValue(dolphin, "Core", "SyncGPU") ?? "False",
+      syncGpuOnSkipIdle: getIniValue(dolphin, "Core", "SyncGPUOnSkipIdleHack") ?? "True",
       fastmem: getIniValue(dolphin, "Core", "Fastmem") ?? "True",
       mmu: getIniValue(dolphin, "Core", "MMU") ?? "False",
       fprf: getIniValue(dolphin, "Core", "FPRF") ?? "False",
@@ -1936,8 +1942,10 @@ function renderSettings() {
   html += '<div style="font-size:11px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;margin-top:16px">⚡ CPU & Audio</div>';
 
   html += settingToggle('DSP HLE', 'dolphin.dspHle', s.dolphin.dspHle === 'True', 'High-level audio emulation — much faster than LLE');
+  html += settingToggle('Dual Core', 'dolphin.cpuThread', s.dolphin.cpuThread === 'True', 'Run CPU and GPU on separate threads — big perf gain for multiplayer');
   html += settingToggle('Skip Idle', 'dolphin.skipIdle', s.dolphin.skipIdle === 'True', 'Skip idle CPU loops — saves cycles');
   html += settingToggle('Sync GPU', 'dolphin.syncGpu', s.dolphin.syncGpu === 'True', 'GPU synchronization — off = faster but may glitch');
+  html += settingToggle('Sync GPU on Skip Idle', 'dolphin.syncGpuOnSkipIdle', s.dolphin.syncGpuOnSkipIdle === 'True', 'Helps stability when Dual Core + Skip Idle are both on');
   html += settingToggle('Fast Memory', 'dolphin.fastmem', s.dolphin.fastmem === 'True', 'Fast memory access for JIT — keep enabled');
   html += settingToggle('Full MMU', 'dolphin.mmu', s.dolphin.mmu === 'True', 'Full memory management — very slow, rarely needed');
   html += settingToggle('FP Result Flags', 'dolphin.fprf', s.dolphin.fprf === 'True', 'Floating point accuracy — off = faster');
@@ -2028,7 +2036,9 @@ async function saveSettings() {
     // Performance - Dolphin
     'dolphin.dspHle': { file: 'Dolphin.ini', section: 'Core', key: 'DSPHLE', toggle: true },
     'dolphin.skipIdle': { file: 'Dolphin.ini', section: 'Core', key: 'SkipIdle', toggle: true },
+    'dolphin.cpuThread': { file: 'Dolphin.ini', section: 'Core', key: 'CPUThread', toggle: true },
     'dolphin.syncGpu': { file: 'Dolphin.ini', section: 'Core', key: 'SyncGPU', toggle: true },
+    'dolphin.syncGpuOnSkipIdle': { file: 'Dolphin.ini', section: 'Core', key: 'SyncGPUOnSkipIdleHack', toggle: true },
     'dolphin.fastmem': { file: 'Dolphin.ini', section: 'Core', key: 'Fastmem', toggle: true },
     'dolphin.mmu': { file: 'Dolphin.ini', section: 'Core', key: 'MMU', toggle: true },
     'dolphin.fprf': { file: 'Dolphin.ini', section: 'Core', key: 'FPRF', toggle: true },
