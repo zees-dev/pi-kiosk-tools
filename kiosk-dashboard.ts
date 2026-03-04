@@ -186,7 +186,7 @@ function getSystemDiagnostics() {
   }
 
   // Services health
-  const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "vnc", "kiosk-dashboard"];
+  const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "virtual-pad", "vnc", "kiosk-dashboard"];
   const services = serviceNames.map(name => {
     const active = run(`systemctl is-active ${name}.service 2>/dev/null`) === "active";
     const runtimeDisabled = existsSync(`/run/systemd/system/${name}.service.d/disable.conf`);
@@ -360,7 +360,7 @@ function getApps(): App[] {
   const ip = getLanIp();
   const mode = getKioskMode();
   const apps: App[] = [
-    { id: "retrobox", name: "Retrobox", icon: "🕹️", url: `http://${ip}:3333`, description: "Retro gaming emulator" },
+    { id: "retrobox", name: "Retrobox", icon: "🕹️", url: `https://${ip}:3334`, description: "Retro gaming emulator" },
     { id: "dolphin", name: "Dolphin", icon: "🐬", url: `http://${ip}:3460`, description: "GameCube / Wii emulator" },
   ];
 
@@ -374,6 +374,7 @@ function getApps(): App[] {
     { id: "wifi", name: "WiFi Manager", icon: "📶", url: `http://${ip}:3457`, description: "Network settings", diagnosticsUrl: `http://${ip}:3457/api/diagnostics` },
     { id: "bluetooth", name: "Bluetooth", icon: "🔵", url: `http://${ip}:3456`, description: "Controller pairing", diagnosticsUrl: `http://${ip}:3456/api/diagnostics` },
     { id: "remotepad", name: "RemotePad", icon: "🎮", url: `http://${ip}:3458`, description: "PS4 controller bridge", diagnosticsUrl: `http://${ip}:3458/api/diagnostics` },
+    { id: "virtualpad", name: "Virtual Pad", icon: "🎮", url: `http://${ip}:3461/view`, description: "Web-based game controller" },
     { id: "vnc", name: "VNC", icon: "📺", url: `http://${ip}:6080/vnc.html?host=${ip}&port=6080&autoconnect=true&resize=scale&quality=6&show_dot=true&view_clip=true`, description: "View kiosk display remotely", external: true },
   );
   return apps;
@@ -1212,7 +1213,7 @@ let diagCache = {};
 
 function formatDiag(app, diag) {
   // Check service status first
-  const appServiceMap = { retrobox: 'retrobox', dolphin: 'dolphin-manager', wifi: 'wifi-manager', bluetooth: 'bluetooth-manager', remotepad: 'remote-pad', vnc: 'vnc' };
+  const appServiceMap = { retrobox: 'retrobox', dolphin: 'dolphin-manager', wifi: 'wifi-manager', bluetooth: 'bluetooth-manager', remotepad: 'remote-pad', virtualpad: 'virtual-pad', vnc: 'vnc' };
   const svcName = appServiceMap[app.id];
   const svcInfo = svcName && window._serviceMap ? window._serviceMap[svcName] : null;
   if (svcInfo && !svcInfo.active) return '<div class="diag"><div class="diag-line diag-off">Service disabled</div></div>';
@@ -1252,14 +1253,17 @@ function renderApps(kioskUrl) {
     const card = document.createElement('div');
     const isActive = kioskUrl && app.url && kioskUrl.startsWith(app.url);
     const isMoonlightStop = app.action === 'stop-moonlight';
-    const appServiceMap = { retrobox: 'retrobox', dolphin: 'dolphin-manager', wifi: 'wifi-manager', bluetooth: 'bluetooth-manager', remotepad: 'remote-pad', vnc: 'vnc' };
+    const appServiceMap = { retrobox: 'retrobox', dolphin: 'dolphin-manager', wifi: 'wifi-manager', bluetooth: 'bluetooth-manager', remotepad: 'remote-pad', virtualpad: 'virtual-pad', vnc: 'vnc' };
     const svcName = appServiceMap[app.id];
     const svcInfo = svcName && window._serviceMap ? window._serviceMap[svcName] : null;
     const isDisabled = svcInfo ? !svcInfo.active : false;
     card.className = 'app-card' + (isActive ? ' active' : '') + (isMoonlightStop ? ' active' : '') + (isDisabled ? ' disabled' : '');
     const diagHtml = app.action ? '' : formatDiag(app, diagCache[app.id]);
+    let ctrlHtml = '';
+    if (!isDisabled && app.id === 'retrobox') ctrlHtml = '<a class="open-link" href="https://' + location.hostname + ':3334/controller.html?screen=127-0-0-1" target="_blank" title="Controller" onclick="event.stopPropagation()">⊞</a>';
+    if (!isDisabled && app.id === 'virtualpad') ctrlHtml = '<a class="open-link" href="http://' + location.hostname + ':3461/" target="_blank" title="Open controller" onclick="event.stopPropagation()">🎮</a>';
     const linkHtml = (!isDisabled && app.url) ? '<a class="open-link" href="' + app.url + '" target="_blank" title="Open in browser">↗</a>' : '';
-    card.innerHTML = '<div class="icon">' + app.icon + '</div><div class="app-info"><div class="name">' + app.name + '</div><div class="desc">' + app.description + '</div></div>' + diagHtml + linkHtml;
+    card.innerHTML = '<div class="icon">' + app.icon + '</div><div class="app-info"><div class="name">' + app.name + '</div><div class="desc">' + app.description + '</div></div>' + diagHtml + ctrlHtml + linkHtml;
     if (isDisabled) {
       // no click handler
     } else if (app.action) {
@@ -2489,7 +2493,7 @@ const server = serve({
 
     // API: service control
     if (path === "/api/services" && req.method === "GET") {
-      const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "vnc", "kiosk-dashboard", "openclaw"];
+      const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "virtual-pad", "vnc", "kiosk-dashboard", "openclaw"];
       // Services with wantedBy=[] (on-demand only) — toggle reflects active state
       const onDemandServices = new Set(["vnc"]);
       const services = serviceNames.map(name => {
