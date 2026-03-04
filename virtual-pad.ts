@@ -47,13 +47,14 @@ interface PlayerSlot {
   prevAxes: Uint8Array;
   lastState: Uint8Array | null;
   label: string;
+  vendorId: number;
 }
 
 const slots: PlayerSlot[] = [];
 for (let i = 0; i < MAX_PLAYERS; i++) {
   const axes = new Uint8Array(6);
   axes[0] = axes[1] = axes[2] = axes[3] = 128;
-  slots.push({ ws: null, proc: null, prevButtons: 0, prevAxes: axes, lastState: null, label: "" });
+  slots.push({ ws: null, proc: null, prevButtons: 0, prevAxes: axes, lastState: null, label: "", vendorId: 0 });
 }
 
 const viewClients = new Set<any>();
@@ -101,6 +102,11 @@ function processInput(idx: number, data: ArrayBuffer) {
   const view = new DataView(data);
   const buttons = view.getUint32(0, true);
   const axes = [view.getUint8(4), view.getUint8(5), view.getUint8(6), view.getUint8(7), view.getUint8(8), view.getUint8(9)];
+  // Vendor ID at bytes 10-11 (optional, 12-byte protocol)
+  if (data.byteLength >= 12) {
+    const vid = view.getUint16(10, true);
+    slot.vendorId = vid;
+  }
   let changed = false;
 
   if (buttons !== slot.prevButtons) {
@@ -145,7 +151,8 @@ interface HwController {
   type: string; // bluetooth | usb
   eventPath: string;
   eventNum: number;
-  isNintendo: boolean; // Nintendo controllers swap X/Y face buttons
+  isNintendo: boolean;
+  vendorId: number;
   // Axis calibration
   absInfo: Map<number, { min: number; max: number }>;
   // Live state — same 10-byte protocol as web controllers
@@ -404,10 +411,11 @@ function scanAndUpdateHw() {
       if (!eventMatch) continue;
       const eventNum = parseInt(eventMatch[1]);
       const eventPath = `/dev/input/event${eventNum}`;
-      // Detect Nintendo controllers by vendor (057e = Nintendo)
-      const vendorStr = get("I: ").match(/Vendor=(\w+)/)?.[1] || "";
-      const isNintendo = vendorStr.toLowerCase() === "057e";
-      found.set(eventPath, { name, type, eventNum, isNintendo });
+      // Detect controller brand by vendor
+      const vendorStr = (get("I: ").match(/Vendor=(\w+)/)?.[1] || "").toLowerCase();
+      const vendorId = parseInt(vendorStr, 16) || 0;
+      const isNintendo = vendorId === 0x057e;
+      found.set(eventPath, { name, type, eventNum, isNintendo, vendorId });
     }
   } catch {}
 
@@ -419,7 +427,7 @@ function scanAndUpdateHw() {
       state[4] = state[5] = state[6] = state[7] = 128; // center sticks
       const hw: HwController = {
         name: info.name, type: info.type, eventPath: path, eventNum: info.eventNum,
-        isNintendo: info.isNintendo, absInfo, state, stream: null,
+        isNintendo: info.isNintendo, vendorId: info.vendorId, absInfo, state, stream: null,
         rawButtons: new Set(), rawAxes: new Map(),
       };
       hwControllers.set(path, hw);
@@ -449,6 +457,7 @@ function broadcastPlayerState(idx: number) {
     slot: idx + 1,
     connected: !!s.ws,
     label: s.label,
+    vendor: s.vendorId,
     state: s.lastState ? Array.from(s.lastState) : null,
   });
   for (const c of viewClients) { try { c.send(msg); } catch {} }
@@ -463,6 +472,7 @@ function broadcastHwState(eventPath: string) {
     eventPath,
     name: hw.name,
     connType: hw.type,
+    vendor: hw.vendorId,
     state: Array.from(hw.state),
   });
   for (const c of viewClients) { try { c.send(msg); } catch {} }
@@ -490,11 +500,12 @@ function broadcastFull() {
 function getFullState(): string {
   const players = slots.map((s, i) => ({
     slot: i + 1, connected: !!s.ws, label: s.label,
+    vendor: s.vendorId,
     state: s.lastState ? Array.from(s.lastState) : null,
   })).filter(p => p.connected);
   const hw = Array.from(hwControllers.values()).map(h => ({
     eventPath: h.eventPath, name: h.name, connType: h.type,
-    state: Array.from(h.state),
+    vendor: h.vendorId, state: Array.from(h.state),
   }));
   return JSON.stringify({ type: "full", players, hw });
 }
@@ -593,6 +604,7 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
   <div class="status">
     <span class="player-badge" id="playerBadge">P?</span>
     <span class="conn-dot connecting" id="connDot"></span>
+
   </div>
 
   <div class="shoulders">
@@ -650,7 +662,7 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
 // NETWORK LAYER — binary WebSocket, player assignment, reconnect
 // ═══════════════════════════════════════════════════════════════
 const net = (() => {
-  const buf = new ArrayBuffer(10), dv = new DataView(buf);
+  const buf = new ArrayBuffer(12), dv = new DataView(buf);
   const params = new URLSearchParams(location.search);
   const wantP = parseInt(params.get('player') || params.get('p') || '0');
   let ws = null, player = null;
@@ -674,11 +686,12 @@ const net = (() => {
   connect();
 
   return {
-    send(buttons, lx, ly, rx, ry, l2, r2) {
+    send(buttons, lx, ly, rx, ry, l2, r2, vendor) {
       if (!ws || ws.readyState !== 1) return;
       dv.setUint32(0, buttons, true);
       dv.setUint8(4, lx); dv.setUint8(5, ly); dv.setUint8(6, rx); dv.setUint8(7, ry);
       dv.setUint8(8, l2); dv.setUint8(9, r2);
+      dv.setUint16(10, vendor, true);
       ws.send(buf);
     },
     onAssign(fn) { cbs.assign.push(fn); },
@@ -693,8 +706,10 @@ const net = (() => {
 // ═══════════════════════════════════════════════════════════════
 let buttons = 0, lx = 128, ly = 128, rx = 128, ry = 128, l2 = 0, r2 = 0;
 let touchBtns = 0; // bits currently held by touch UI
+let gpVendor = 0;  // raw USB vendor ID from Gamepad API (e.g. 0x054c)
 
-function flush() { net.send(buttons, lx, ly, rx, ry, l2, r2); }
+
+function flush() { net.send(buttons, lx, ly, rx, ry, l2, r2, gpVendor); }
 
 // ═══════════════════════════════════════════════════════════════
 // STATUS UI — top-right badge + dot
@@ -763,6 +778,54 @@ setupStick('stickR','thumbR',true,11);
 // ═══════════════════════════════════════════════════════════════
 let gpPrevB = 0, gpPrevA = [128,128,128,128,0,0];
 
+function getVendorId(gp) {
+  const id = gp.id || '';
+  const m = id.match(/Vendor:\\s*([0-9a-fA-F]{4})/i);
+  if (m) return parseInt(m[1], 16);
+  // Fallback: match only unambiguous names (BT gamepads may omit vendor string)
+  const lo = id.toLowerCase();
+  if (lo.includes('dualshock') || lo.includes('dualsense')) return 0x054c;
+  if (lo.includes('pro controller') || lo.includes('joy-con')) return 0x057e;
+  return 0;
+}
+
+function vendorToType(v) {
+  if (v === 0x057e) return 'nintendo';
+  if (v === 0x054c) return 'playstation';
+  return 'xbox';
+}
+
+const FACE_LABELS = {
+  xbox:        { 0: 'A', 1: 'B', 2: 'X', 3: 'Y' },
+  nintendo:    { 0: 'A', 1: 'B', 2: 'X', 3: 'Y' },
+  playstation: { 0: '✕', 1: '○', 2: '□', 3: '△' },
+};
+// URL override: ?labels=xbox|ps|nintendo
+const qp = new URLSearchParams(location.search);
+const labelsOverride = qp.get('labels') || qp.get('l') || '';
+const LABELS_MAP = { ps: 'playstation', playstation: 'playstation', nintendo: 'nintendo', xbox: 'xbox' };
+let currentGpType = LABELS_MAP[labelsOverride] || 'xbox';
+// Apply override immediately if set
+if (LABELS_MAP[labelsOverride]) {
+  const labels = FACE_LABELS[currentGpType];
+  for (const [bit, label] of Object.entries(labels)) {
+    const el = document.querySelector('[data-btn="' + bit + '"]');
+    if (el) el.textContent = label;
+  }
+}
+
+function applyFaceLabels(vendor) {
+  if (LABELS_MAP[labelsOverride]) return; // manual override — skip auto-detect
+  const type = vendorToType(vendor);
+  if (type === currentGpType) return;
+  currentGpType = type;
+  const labels = FACE_LABELS[type];
+  for (const [bit, label] of Object.entries(labels)) {
+    const el = document.querySelector('[data-btn="' + bit + '"]');
+    if (el) el.textContent = label;
+  }
+}
+
 function pollGamepad() {
   const gps = navigator.getGamepads ? navigator.getGamepads() : [];
   let gp = null;
@@ -770,6 +833,15 @@ function pollGamepad() {
   if (gp) {
     let gb = 0;
     for (let i = 0; i < Math.min(gp.buttons.length, 17); i++) if (gp.buttons[i].pressed) gb |= (1 << i);
+    // Extract raw vendor ID, update labels
+    gpVendor = getVendorId(gp);
+    applyFaceLabels(gpVendor);
+
+    // Nintendo: standard mapping is positional — swap A↔B (bits 0,1) and X↔Y (bits 2,3)
+    if (gpVendor === 0x057e) {
+      const a = (gb >> 0) & 1, b = (gb >> 1) & 1, x = (gb >> 2) & 1, y = (gb >> 3) & 1;
+      gb = (gb & ~0xF) | (b << 0) | (a << 1) | (y << 2) | (x << 3);
+    }
     const a = [
       Math.round(128 + gp.axes[0] * 127), Math.round(128 + gp.axes[1] * 127),
       gp.axes.length > 2 ? Math.round(128 + gp.axes[2] * 127) : 128,
@@ -780,14 +852,23 @@ function pollGamepad() {
     let changed = gb !== gpPrevB;
     if (!changed) for (let i = 0; i < 6; i++) if (a[i] !== gpPrevA[i]) { changed = true; break; }
     if (changed) {
-      // Gamepad replaces state; touch buttons merge on top
       buttons = gb | touchBtns;
       lx = a[0]; ly = a[1]; rx = a[2]; ry = a[3]; l2 = a[4]; r2 = a[5];
+      // Trigger fills
       document.getElementById('fillL2').style.height = (a[4]/255*100)+'%';
       document.getElementById('fillR2').style.height = (a[5]/255*100)+'%';
+      // Button highlights
       for (let i = 0; i < 17; i++) {
         document.querySelector('[data-btn="'+i+'"]')?.classList.toggle('pressed', !!(buttons & (1<<i)));
       }
+      // Stick thumbs
+      const tL = document.getElementById('thumbL'), tR = document.getElementById('thumbR');
+      const ldx = ((a[0]-128)/127*35).toFixed(1), ldy = ((a[1]-128)/127*35).toFixed(1);
+      const rdx = ((a[2]-128)/127*35).toFixed(1), rdy = ((a[3]-128)/127*35).toFixed(1);
+      tL.style.transform = 'translate(calc(-50% + '+ldx+'px),calc(-50% + '+ldy+'px))';
+      tR.style.transform = 'translate(calc(-50% + '+rdx+'px),calc(-50% + '+rdy+'px))';
+      tL.classList.toggle('active', a[0]!==128||a[1]!==128);
+      tR.classList.toggle('active', a[2]!==128||a[3]!==128);
       flush();
       gpPrevB = gb; gpPrevA = a;
     }
@@ -880,7 +961,12 @@ const VIEW_HTML = `<!DOCTYPE html>
 const $ = id => document.getElementById(id);
 $('hostAddr').textContent = location.host;
 
-const BTN_NAMES = {0:'A',1:'B',2:'X',3:'Y',4:'L1',5:'R1',6:'L2',7:'R2',8:'SEL',9:'STR',10:'L3',11:'R3',12:'↑',13:'↓',14:'←',15:'→',16:'⊙'};
+const VENDOR_LABELS = {
+  0x054c: {0:'✕',1:'○',2:'□',3:'△',4:'L1',5:'R1',6:'L2',7:'R2',8:'SHR',9:'OPT',10:'L3',11:'R3',12:'↑',13:'↓',14:'←',15:'→',16:'PS'},
+  0x057e: {0:'A',1:'B',2:'X',3:'Y',4:'L',5:'R',6:'ZL',7:'ZR',8:'-',9:'+',10:'L3',11:'R3',12:'↑',13:'↓',14:'←',15:'→',16:'⊙'},
+};
+const XBOX_LABELS = {0:'A',1:'B',2:'X',3:'Y',4:'LB',5:'RB',6:'LT',7:'RT',8:'SEL',9:'STR',10:'L3',11:'R3',12:'↑',13:'↓',14:'←',15:'→',16:'⊙'};
+function getBtnNames(vendor) { return VENDOR_LABELS[vendor] || XBOX_LABELS; }
 
 // Parse 10-byte state array into usable object
 function parseState(s) {
@@ -889,7 +975,7 @@ function parseState(s) {
   return { buttons: b, lx: s[4], ly: s[5], rx: s[6], ry: s[7], l2: s[8], r2: s[9] };
 }
 
-function renderViz(state) {
+function renderViz(state, ctrlType) {
   const s = parseState(state);
   if (!s) return '<div class="pad-viz" style="color:#444;font-size:11px">Idle</div>';
 
@@ -901,9 +987,10 @@ function renderViz(state) {
   const r2P = (s.r2 / 255 * 100).toFixed(0);
   const lActive = s.lx !== 128 || s.ly !== 128;
   const rActive = s.rx !== 128 || s.ry !== 128;
+  const names = getBtnNames(ctrlType || 'xbox');
 
   const pressed = [];
-  for (const [bit, name] of Object.entries(BTN_NAMES)) {
+  for (const [bit, name] of Object.entries(names)) {
     if (s.buttons & (1 << Number(bit))) pressed.push(name);
   }
 
@@ -928,7 +1015,7 @@ function renderWebCard(slot, data) {
     '<span class="ctrl-name">'+(data.label || 'Web Controller')+'</span>' +
     '<span class="ctrl-type">web</span>' +
     '</div>' +
-    '<div class="ctrl-state">'+renderViz(data.state)+'</div>' +
+    '<div class="ctrl-state">'+renderViz(data.state, data.vendor)+'</div>' +
     '</div>';
 }
 
@@ -940,7 +1027,7 @@ function renderHwCard(key, data) {
     '<span class="ctrl-name">'+data.name+'</span>' +
     '<span class="ctrl-type">'+icon+' '+data.connType+'</span>' +
     '</div>' +
-    '<div class="ctrl-state">'+renderViz(data.state)+'</div>' +
+    '<div class="ctrl-state">'+renderViz(data.state, data.vendor)+'</div>' +
     '</div>';
 }
 
@@ -957,20 +1044,20 @@ function refreshHwGrid() {
 }
 
 // Surgical update — just update the viz inside existing card
-function updateViz(id, state) {
+function updateViz(id, state, ctrlType) {
   const card = document.getElementById(id);
   if (!card) return false;
   const el = card.querySelector('.ctrl-state');
-  if (el) el.innerHTML = renderViz(state);
+  if (el) el.innerHTML = renderViz(state, ctrlType);
   return true;
 }
 
 function handle(msg) {
   if (msg.type === 'full') {
     webPlayers = {};
-    for (const p of msg.players) webPlayers[p.slot] = { label: p.label, state: p.state };
+    for (const p of msg.players) webPlayers[p.slot] = { label: p.label, state: p.state, vendor: p.vendor };
     hwDevices = {};
-    for (const h of msg.hw) hwDevices[h.eventPath] = { name: h.name, connType: h.connType, state: h.state };
+    for (const h of msg.hw) hwDevices[h.eventPath] = { name: h.name, connType: h.connType, state: h.state, vendor: h.vendor };
     refreshWebGrid();
     refreshHwGrid();
   } else if (msg.type === 'connect') {
@@ -982,16 +1069,16 @@ function handle(msg) {
     else { delete webPlayers[msg.slot]; refreshWebGrid(); }
   } else if (msg.type === 'player') {
     if (msg.connected) {
-      if (!webPlayers[msg.slot]) { webPlayers[msg.slot] = { label: msg.label, state: msg.state }; refreshWebGrid(); }
-      else { webPlayers[msg.slot].state = msg.state; updateViz('web-'+msg.slot, msg.state); }
+      if (!webPlayers[msg.slot]) { webPlayers[msg.slot] = { label: msg.label, state: msg.state, vendor: msg.vendor }; refreshWebGrid(); }
+      else { webPlayers[msg.slot].state = msg.state; webPlayers[msg.slot].vendor = msg.vendor; updateViz('web-'+msg.slot, msg.state, msg.vendor); }
     }
   } else if (msg.type === 'hw') {
     if (!hwDevices[msg.eventPath]) {
-      hwDevices[msg.eventPath] = { name: msg.name, connType: msg.connType, state: msg.state };
+      hwDevices[msg.eventPath] = { name: msg.name, connType: msg.connType, state: msg.state, vendor: msg.vendor };
       refreshHwGrid();
     } else {
       hwDevices[msg.eventPath].state = msg.state;
-      updateViz('hw-'+CSS.escape(msg.eventPath), msg.state);
+      updateViz('hw-'+CSS.escape(msg.eventPath), msg.state, hwDevices[msg.eventPath].vendor);
     }
   }
 }
@@ -1088,7 +1175,6 @@ const server = Bun.serve({
       const d = (ws as any).data;
       if (d.type === "view") return;
       if (d.slotIndex !== undefined && (data instanceof ArrayBuffer || data instanceof Uint8Array)) {
-        // Bun delivers binary as Buffer (Uint8Array), normalize to ArrayBuffer
         const ab = data instanceof ArrayBuffer ? data : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
         processInput(d.slotIndex, ab);
       }
