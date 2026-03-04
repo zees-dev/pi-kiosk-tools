@@ -152,6 +152,8 @@ function processInput(idx: number, data: ArrayBuffer) {
 
 function findFreeSlot(): number {
   for (let i = 0; i < MAX_PLAYERS; i++) {
+    // When hw forwarding is on, skip slots claimed by hardware controllers
+    if (hwForwardingEnabled && Array.from(hwSlotMap.values()).includes(i)) continue;
     if (!slots[i].ws) return i;
   }
   return -1;
@@ -194,7 +196,45 @@ function findFreeHwSlot(): number {
 
 function assignHwToSlot(eventPath: string): number {
   if (hwSlotMap.has(eventPath)) return hwSlotMap.get(eventPath)!;
-  const idx = findFreeHwSlot();
+
+  // Hardware gets priority — find lowest slot, bumping web clients if needed
+  let idx = -1;
+  for (let i = 0; i < MAX_PLAYERS; i++) {
+    if (Array.from(hwSlotMap.values()).includes(i)) continue; // already hw-claimed
+    if (slots[i].ws) {
+      // Web client on this slot — try to bump it to a higher free slot
+      let bumpTo = -1;
+      for (let j = i + 1; j < MAX_PLAYERS; j++) {
+        if (!slots[j].ws && !Array.from(hwSlotMap.values()).includes(j)) { bumpTo = j; break; }
+      }
+      if (bumpTo >= 0) {
+        // Move web client up
+        const oldWs = slots[i].ws;
+        const oldLabel = slots[i].label;
+        const oldVendor = slots[i].vendorId;
+        const oldLast = slots[i].lastState;
+        stopSlot(i);
+        slots[i].ws = null;
+
+        slots[bumpTo].ws = oldWs;
+        slots[bumpTo].label = oldLabel;
+        slots[bumpTo].vendorId = oldVendor;
+        slots[bumpTo].lastState = oldLast;
+        (oldWs as any).data.slotIndex = bumpTo;
+        startSlot(bumpTo);
+        try { oldWs.send(JSON.stringify({ type: "slot", slot: bumpTo + 1 })); } catch {}
+        console.log(`  ↗ Bumped web Player ${i + 1} → slot ${bumpTo + 1} (hw priority)`);
+        broadcastPlayerState(bumpTo);
+        idx = i;
+        break;
+      }
+      continue; // can't bump, try next slot
+    }
+    // Empty slot
+    idx = i;
+    break;
+  }
+
   if (idx < 0) return -1;
   if (!startSlot(idx)) return -1;
   hwSlotMap.set(eventPath, idx);
