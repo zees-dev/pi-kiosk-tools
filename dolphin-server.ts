@@ -181,8 +181,19 @@ function restartKiosk(): void {
     // Remove any runtime drop-in overrides (e.g. Restart=no from other tools)
     execSync(`${SUDO} rm -rf /run/systemd/system/kiosk.service.d`, { timeout: 5000 });
     execSync(`${SUDO} systemctl daemon-reload`, { timeout: 5000 });
-    execSync(`${SUDO} systemctl restart kiosk.service`, { timeout: 10000 });
   } catch {}
+  try {
+    execSync(`${SUDO} systemctl restart kiosk.service`, { timeout: 10000 });
+  } catch {
+    // Restart timed out — Cage is stuck. Force kill and retry.
+    console.log("[kiosk] restart timed out, force-killing Cage/Chromium");
+    try { execSync(`${SUDO} pkill -9 -f cage`, { timeout: 3000 }); } catch {}
+    try { execSync(`${SUDO} pkill -9 -f chromium-kiosk`, { timeout: 3000 }); } catch {}
+    try { execSync(`${SUDO} systemctl reset-failed kiosk.service`, { timeout: 3000 }); } catch {}
+    try { execSync(`${SUDO} systemctl start kiosk.service`, { timeout: 10000 }); } catch (e: any) {
+      console.log(`[kiosk] failed to start after force-kill: ${e.message}`);
+    }
+  }
 }
 
 function ensureDirs(): void {
@@ -2213,6 +2224,7 @@ const server = serve({
       return Response.json({
         state: currentState,
         rom: currentRom ? prettifyName(currentRom) : undefined,
+        pid: dolphinProc?.pid ?? undefined,
         error: lastError || undefined,
       });
     }

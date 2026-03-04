@@ -263,6 +263,24 @@ function getSystemDiagnostics() {
     ports.sort((a, b) => a.port - b.port);
   } catch {}
 
+  // Process list
+  let processList: { pid: number; user: string; cpu: number; mem: number; rss: number; cmd: string }[] = [];
+  try {
+    const psRaw = run("/run/current-system/sw/bin/ps axo pid,user,%cpu,%mem,rss,comm --sort=-%cpu --no-headers 2>/dev/null");
+    for (const line of psRaw.split("\n")) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 6) continue;
+      const pid = parseInt(parts[0]);
+      const user = parts[1];
+      const cpu = parseFloat(parts[2]) || 0;
+      const mem = parseFloat(parts[3]) || 0;
+      const rss = parseInt(parts[4]) || 0;
+      const cmd = parts.slice(5).join(" ");
+      if (cmd === "ps" || cmd === "kiosk-dashboa") continue;
+      processList.push({ pid, user, cpu, mem, rss, cmd });
+    }
+  } catch {}
+
   return {
     cpu: { temp: cpuTemp, usage: cpuUsage, freqMhz: cpuFreqCur, maxFreqMhz: cpuFreqMax },
     gpu: { temp: gpuTemp },
@@ -283,6 +301,7 @@ function getSystemDiagnostics() {
     containers,
     services,
     ports,
+    processList,
   };
 }
 
@@ -856,6 +875,7 @@ const HTML = `<!DOCTYPE html>
     <div id="sysCards"></div>
     <div id="svcsSection"></div>
     <div id="sysCards2"></div>
+    <div id="procsSection" style="margin-top:8px"></div>
     <div id="portsSection" style="margin-top:8px"></div>
   </div>
 </div>
@@ -1073,8 +1093,20 @@ function renderSysCards(sys) {
   $('sysCards2').innerHTML = html2;
 }
 
-// ── Ports (cached, only re-renders on change) ──
+// ── Ports & Processes (expandable, filterable) ──
 let lastPortsJson = '';
+let lastProcsJson = '';
+
+function fuzzyMatch(text, query) {
+  text = text.toLowerCase();
+  query = query.toLowerCase();
+  if (!query) return true;
+  let qi = 0;
+  for (let i = 0; i < text.length && qi < query.length; i++) {
+    if (text[i] === query[qi]) qi++;
+  }
+  return qi === query.length;
+}
 
 function renderPorts(ports) {
   const json = JSON.stringify(ports);
@@ -1083,42 +1115,160 @@ function renderPorts(ports) {
 
   const el = $('portsSection');
   if (!el) return;
-
   if (!ports || !ports.length) { el.innerHTML = ''; return; }
 
+  // Inject Dolphin emulator process if running
+  if (window._dolphinStatus && window._dolphinStatus.state === 'running') {
+    const ds = window._dolphinStatus;
+    ports = [...ports, { port: 0, proto: 'emu', process: 'dolphin-emu' + (ds.rom ? ': ' + ds.rom : ''), pid: ds.pid || 0 }];
+  }
+
+  window._portsData = ports;
+  const collapsed = el.dataset.collapsed === 'true';
+  const filter = el.dataset.filter || '';
+  const preview = 5;
+
   const selfProcs = ['kiosk-dashboa', 'openclaw'];
-  const portRows = ports.map(p => {
+  const filtered = ports.filter(p => !filter || fuzzyMatch(p.process + ':' + p.port, filter));
+  const visible = collapsed ? filtered.slice(0, preview) : filtered;
+  const hasMore = collapsed && filtered.length > preview;
+
+  const portRows = visible.map(p => {
     const isSelf = selfProcs.some(s => p.process.startsWith(s));
+    const isEmu = p.proto === 'emu';
+    const portLabel = isEmu ? '🐬' : ':' + p.port;
+    const portColor = isEmu ? '#9b59b6' : (isSelf ? '#c47070' : '#4CAF50');
     return '<div class="svc-row' + (isSelf ? ' self' : '') + '">' +
       '<span class="svc-dot-lg up"></span>' +
-      '<span class="svc-name" style="flex:0 0 55px;color:' + (isSelf ? '#c47070' : '#4CAF50') + ';font-family:monospace">:' + p.port + '</span>' +
-      '<span class="svc-name">' + escHtml(p.process) + (p.pid ? ' <span style="color:#555;font-size:11px">(' + p.pid + ')</span>' : '') + '</span>' +
-      (p.pid ? '<button class="svc-stop-btn port-kill" data-pid="' + p.pid + '" title="Kill process">✕</button>' : '') +
+      '<span class="svc-name" style="flex:0 0 55px;color:' + portColor + ';font-family:monospace">' + portLabel + '</span>' +
+      '<span class="svc-name" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(p.process) + (p.pid ? ' <span style="color:#555;font-size:11px">(' + p.pid + ')</span>' : '') + '</span>' +
+      (isEmu
+        ? '<button class="svc-stop-btn port-kill" data-action="stop-dolphin" title="Force stop Dolphin">✕</button>'
+        : (p.pid ? '<button class="svc-stop-btn port-kill" data-pid="' + p.pid + '" title="Kill process">✕</button>' : '')) +
     '</div>';
   }).join('');
 
-  el.innerHTML =
-    '<div class="sys-card" style="margin-top:0"><div class="sys-label">Ports</div><div class="sys-value">' +
-    '<div class="svc-list-full">' + portRows + '</div></div></div>';
+  const expandBtn = hasMore ? '<div style="text-align:center;padding:4px 0"><button class="expand-toggle" data-target="ports" style="background:none;border:1px solid #333;color:#888;border-radius:6px;padding:2px 12px;font-size:11px;cursor:pointer">+' + (filtered.length - preview) + ' more</button></div>' : '';
+  const collapseBtn = !collapsed && filtered.length > preview ? '<div style="text-align:center;padding:4px 0"><button class="collapse-toggle" data-target="ports" style="background:none;border:1px solid #333;color:#888;border-radius:6px;padding:2px 12px;font-size:11px;cursor:pointer">Show less</button></div>' : '';
+  const filterInput = '<input type="text" class="filter-input" data-target="ports" placeholder="Filter ports..." value="' + escHtml(filter) + '" style="width:100%;padding:4px 8px;margin-bottom:6px;background:#1a1a1a;border:1px solid #333;border-radius:4px;color:#ccc;font-size:12px;outline:none;box-sizing:border-box">';
 
-  // Attach kill handlers
+  el.innerHTML =
+    '<div class="sys-card" style="margin-top:0"><div class="sys-label">Ports <span style="color:#555;font-size:11px">(' + ports.length + ')</span></div><div class="sys-value">' +
+    (ports.length > preview ? filterInput : '') +
+    '<div class="svc-list-full">' + portRows + '</div>' + expandBtn + collapseBtn + '</div></div>';
+
+  if (el.dataset.collapsed === undefined) el.dataset.collapsed = 'true';
+  attachPortsHandlers(el);
+}
+
+function renderProcesses(procs) {
+  const json = JSON.stringify(procs);
+  if (json === lastProcsJson) return;
+  lastProcsJson = json;
+
+  const el = $('procsSection');
+  if (!el) return;
+  if (!procs || !procs.length) { el.innerHTML = ''; return; }
+
+  window._procsData = procs;
+  const collapsed = el.dataset.collapsed === 'true';
+  const filter = el.dataset.filter || '';
+  const preview = 8;
+
+  const filtered = procs.filter(p => !filter || fuzzyMatch(p.cmd + ' ' + p.user + ' ' + p.pid, filter));
+  const visible = collapsed ? filtered.slice(0, preview) : filtered;
+  const hasMore = collapsed && filtered.length > preview;
+
+  const procRows = visible.map(p => {
+    const cpuColor = p.cpu > 50 ? '#e74c3c' : p.cpu > 10 ? '#f39c12' : '#4CAF50';
+    return '<div class="svc-row">' +
+      '<span class="svc-name" style="flex:0 0 50px;color:' + cpuColor + ';font-family:monospace;font-size:11px">' + p.cpu.toFixed(1) + '%</span>' +
+      '<span class="svc-name" style="flex:0 0 45px;color:#666;font-family:monospace;font-size:11px">' + (p.rss >= 1024 ? (p.rss / 1024).toFixed(0) + 'M' : p.rss + 'K') + '</span>' +
+      '<span class="svc-name" style="flex:0 0 50px;color:#555;font-size:11px">' + escHtml(p.user) + '</span>' +
+      '<span class="svc-name" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(p.cmd) + '</span>' +
+      '<span class="svc-name" style="flex:0 0 40px;color:#555;font-size:11px;text-align:right">' + p.pid + '</span>' +
+      '<button class="svc-stop-btn port-kill" data-pid="' + p.pid + '" title="Kill process" style="flex:0 0 24px">✕</button>' +
+    '</div>';
+  }).join('');
+
+  const expandBtn = hasMore ? '<div style="text-align:center;padding:4px 0"><button class="expand-toggle" data-target="procs" style="background:none;border:1px solid #333;color:#888;border-radius:6px;padding:2px 12px;font-size:11px;cursor:pointer">+' + (filtered.length - preview) + ' more</button></div>' : '';
+  const collapseBtn = !collapsed && filtered.length > preview ? '<div style="text-align:center;padding:4px 0"><button class="collapse-toggle" data-target="procs" style="background:none;border:1px solid #333;color:#888;border-radius:6px;padding:2px 12px;font-size:11px;cursor:pointer">Show less</button></div>' : '';
+  const header = '<div class="svc-row" style="border-bottom:1px solid #282828;padding-bottom:2px;margin-bottom:4px">' +
+    '<span style="flex:0 0 50px;color:#555;font-size:10px;text-transform:uppercase">CPU</span>' +
+    '<span style="flex:0 0 45px;color:#555;font-size:10px;text-transform:uppercase">MEM</span>' +
+    '<span style="flex:0 0 50px;color:#555;font-size:10px;text-transform:uppercase">USER</span>' +
+    '<span style="flex:1;color:#555;font-size:10px;text-transform:uppercase">CMD</span>' +
+    '<span style="flex:0 0 40px;color:#555;font-size:10px;text-transform:uppercase;text-align:right">PID</span>' +
+    '<span style="flex:0 0 24px"></span></div>';
+  const filterInput = '<input type="text" class="filter-input" data-target="procs" placeholder="Filter processes..." value="' + escHtml(filter) + '" style="width:100%;padding:4px 8px;margin-bottom:6px;background:#1a1a1a;border:1px solid #333;border-radius:4px;color:#ccc;font-size:12px;outline:none;box-sizing:border-box">';
+
+  el.innerHTML =
+    '<div class="sys-card" style="margin-top:0"><div class="sys-label">Processes <span style="color:#555;font-size:11px">(' + procs.length + ')</span></div><div class="sys-value">' +
+    filterInput + header +
+    '<div class="svc-list-full">' + procRows + '</div>' + expandBtn + collapseBtn + '</div></div>';
+
+  if (el.dataset.collapsed === undefined) el.dataset.collapsed = 'true';
+  attachProcsHandlers(el);
+}
+
+function attachPortsHandlers(el) {
+  el.querySelectorAll('.expand-toggle').forEach(btn => {
+    btn.onclick = () => { el.dataset.collapsed = 'false'; renderPorts(window._portsData); };
+  });
+  el.querySelectorAll('.collapse-toggle').forEach(btn => {
+    btn.onclick = () => { el.dataset.collapsed = 'true'; el.dataset.filter = ''; renderPorts(window._portsData); };
+  });
+  const fi = el.querySelector('.filter-input');
+  if (fi) fi.oninput = (e) => { el.dataset.filter = e.target.value; el.dataset.collapsed = 'false'; renderPorts(window._portsData); };
+
+  // Kill/stop handlers
   el.querySelectorAll('.port-kill').forEach(btn => {
     btn.onclick = async (e) => {
       e.stopPropagation();
+      if (btn.dataset.action === 'stop-dolphin') {
+        if (!confirm('Force stop Dolphin emulator?')) return;
+        showToast('Stopping Dolphin...');
+        try {
+          const resp = await fetch('http://' + location.hostname + ':3460/api/stop', { method: 'POST' });
+          const data = await resp.json();
+          if (data.ok) { showToast('Dolphin stopped'); window._dolphinStatus = null; setTimeout(loadSystem, 1000); }
+          else showToast('Failed: ' + (data.error || 'unknown'), 'error');
+        } catch { showToast('Failed to stop Dolphin', 'error'); }
+        return;
+      }
       const pid = btn.dataset.pid;
-      const port = btn.closest('.svc-row')?.querySelector('.svc-name')?.textContent?.trim() || '';
-      if (!confirm('Kill process ' + pid + (port ? ' on port ' + port : '') + '?\\n\\nNote: systemd may auto-restart this service.')) return;
+      if (!confirm('Kill process ' + pid + '?\\n\\nNote: systemd may auto-restart this service.')) return;
       showToast('Killing process ' + pid + '...');
       try {
         const resp = await fetch('/api/kill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid: parseInt(pid) }) });
         const data = await resp.json();
-        if (data.ok) {
-          showToast('Process killed — refreshing...');
-          lastPortsJson = ''; // force re-render on next fetch
-          setTimeout(loadSystem, 500);
-          setTimeout(loadSystem, 2000);
-          setTimeout(loadSystem, 5000);
-        }
+        if (data.ok) { showToast('Process killed'); lastPortsJson = ''; setTimeout(loadSystem, 500); }
+        else showToast('Failed: ' + (data.error || 'unknown'), 'error');
+      } catch { showToast('Failed to kill process', 'error'); }
+    };
+  });
+}
+
+function attachProcsHandlers(el) {
+  el.querySelectorAll('.expand-toggle').forEach(btn => {
+    btn.onclick = () => { el.dataset.collapsed = 'false'; renderProcesses(window._procsData); };
+  });
+  el.querySelectorAll('.collapse-toggle').forEach(btn => {
+    btn.onclick = () => { el.dataset.collapsed = 'true'; el.dataset.filter = ''; renderProcesses(window._procsData); };
+  });
+  const fi = el.querySelector('.filter-input');
+  if (fi) fi.oninput = (e) => { el.dataset.filter = e.target.value; el.dataset.collapsed = 'false'; renderProcesses(window._procsData); };
+
+  el.querySelectorAll('.port-kill').forEach(btn => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const pid = btn.dataset.pid;
+      if (!confirm('Kill process ' + pid + '?')) return;
+      showToast('Killing process ' + pid + '...');
+      try {
+        const resp = await fetch('/api/kill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid: parseInt(pid) }) });
+        const data = await resp.json();
+        if (data.ok) { showToast('Process killed'); lastProcsJson = ''; setTimeout(loadSystem, 500); }
         else showToast('Failed: ' + (data.error || 'unknown'), 'error');
       } catch { showToast('Failed to kill process', 'error'); }
     };
@@ -1131,7 +1281,13 @@ async function loadSystem() {
     const sys = await resp.json();
     renderStatusBar(sys);
     renderSysCards(sys);
+    // Fetch Dolphin status for ports section
+    try {
+      const dr = await fetch('http://' + location.hostname + ':3460/api/status', { signal: AbortSignal.timeout(2000) });
+      window._dolphinStatus = await dr.json();
+    } catch { window._dolphinStatus = null; }
     renderPorts(sys.ports || []);
+    renderProcesses(sys.processList || []);
   } catch {}
 }
 
