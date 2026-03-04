@@ -176,6 +176,81 @@ interface HwController {
 
 const hwControllers = new Map<string, HwController>(); // key = eventPath
 
+// ── Hardware → uinput forwarding ────────────────────────────────────────
+// When enabled, hardware controllers are assigned uinput slots and their raw
+// evdev events are forwarded through virtual gamepad devices. This allows
+// emulators configured for "Virtual Gamepad N" to receive input from any
+// hardware controller connected at any time (hotplug support).
+let hwForwardingEnabled = false;
+const hwSlotMap = new Map<string, number>(); // eventPath → slot index
+
+function findFreeHwSlot(): number {
+  for (let i = 0; i < MAX_PLAYERS; i++) {
+    // Slot must not have a web client AND not be assigned to another hw controller
+    if (!slots[i].ws && !Array.from(hwSlotMap.values()).includes(i)) return i;
+  }
+  return -1;
+}
+
+function assignHwToSlot(eventPath: string): number {
+  if (hwSlotMap.has(eventPath)) return hwSlotMap.get(eventPath)!;
+  const idx = findFreeHwSlot();
+  if (idx < 0) return -1;
+  if (!startSlot(idx)) return -1;
+  hwSlotMap.set(eventPath, idx);
+  const hw = hwControllers.get(eventPath);
+  if (hw) {
+    slots[idx].label = hw.name;
+    slots[idx].vendorId = hw.vendorId;
+  }
+  console.log(`  🔗 HW forward: ${hw?.name} → Virtual Gamepad ${idx + 1}`);
+  return idx;
+}
+
+function releaseHwSlot(eventPath: string) {
+  const idx = hwSlotMap.get(eventPath);
+  if (idx === undefined) return;
+  // Send neutral state before releasing
+  const slot = slots[idx];
+  if (slot.proc) {
+    for (const [, btn] of BUTTON_MAP) writeEvent(slot, EV_KEY, btn, 0);
+    writeEvent(slot, EV_ABS, ABS_X, 128);
+    writeEvent(slot, EV_ABS, ABS_Y, 128);
+    writeEvent(slot, EV_ABS, ABS_RX, 128);
+    writeEvent(slot, EV_ABS, ABS_RY, 128);
+    writeEvent(slot, EV_ABS, ABS_Z, 0);
+    writeEvent(slot, EV_ABS, ABS_RZ, 0);
+    writeEvent(slot, EV_ABS, ABS_HAT0X, 0);
+    writeEvent(slot, EV_ABS, ABS_HAT0Y, 0);
+    writeEvent(slot, EV_SYN, SYN_REPORT, 0);
+  }
+  stopSlot(idx);
+  slots[idx].label = "";
+  slots[idx].vendorId = 0;
+  hwSlotMap.delete(eventPath);
+  console.log(`  🔓 HW forward released: slot ${idx + 1}`);
+}
+
+function enableHwForwarding() {
+  if (hwForwardingEnabled) return;
+  hwForwardingEnabled = true;
+  console.log("🔗 HW forwarding enabled — hardware controllers → uinput");
+  // Assign all currently connected hw controllers to slots
+  for (const [path] of hwControllers) {
+    assignHwToSlot(path);
+  }
+}
+
+function disableHwForwarding() {
+  if (!hwForwardingEnabled) return;
+  hwForwardingEnabled = false;
+  console.log("🔓 HW forwarding disabled — hardware controllers direct");
+  // Release all hw→uinput assignments
+  for (const path of Array.from(hwSlotMap.keys())) {
+    releaseHwSlot(path);
+  }
+}
+
 function readAbsInfo(eventNum: number, absCode: number): { min: number; max: number } | null {
   try {
     const raw = readFileSync(`/sys/class/input/event${eventNum}/device/absinfo/${absCode}`, "utf-8");
@@ -359,8 +434,17 @@ function startHwMonitor(hw: HwController) {
       } else if (type === EV_SYN && changed) {
         hwStateToProtocol(hw);
         broadcastHwState(hw.eventPath);
+        // Forward normalized state through uinput (same pipeline as web controllers)
+        if (hwForwardingEnabled) {
+          const idx = hwSlotMap.get(hw.eventPath);
+          if (idx !== undefined) {
+            processInput(idx, hw.state.buffer);
+          }
+        }
         changed = false;
       }
+
+
     }
     remainder = data.subarray(offset);
   });
@@ -379,6 +463,7 @@ function stopHwMonitor(eventPath: string) {
   const hw = hwControllers.get(eventPath);
   if (!hw) return;
   if (hw.stream) { try { hw.stream.destroy(); } catch {} hw.stream = null; }
+  if (hwForwardingEnabled) releaseHwSlot(eventPath);
   hwControllers.delete(eventPath);
   console.log(`  ✗ Stopped monitoring ${hw.name}`);
   broadcastFull();
@@ -443,6 +528,7 @@ function scanAndUpdateHw() {
       };
       hwControllers.set(path, hw);
       startHwMonitor(hw);
+      if (hwForwardingEnabled) assignHwToSlot(path);
       broadcastFull();
     }
   }
@@ -1133,7 +1219,7 @@ try {
 const server = Bun.serve({
   port: PORT,
   ...(tlsOpts.cert ? { tls: tlsOpts } : {}),
-  fetch(req, server) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     const path = url.pathname;
 
@@ -1148,6 +1234,23 @@ const server = Bun.serve({
     }
 
     if (path === "/health") return Response.json({ status: "ok" });
+    if (path === "/api/hw-forwarding") {
+      if (req.method === "GET") {
+        return Response.json({
+          enabled: hwForwardingEnabled,
+          mappings: Object.fromEntries(Array.from(hwSlotMap.entries()).map(([ep, idx]) => [ep, idx + 1])),
+        });
+      }
+      if (req.method === "POST") {
+        try {
+          const body: { enabled: boolean } = await req.json();
+          if (body.enabled) enableHwForwarding(); else disableHwForwarding();
+          return Response.json({ ok: true, enabled: hwForwardingEnabled });
+        } catch (e: any) {
+          return Response.json({ ok: false, error: e.message }, { status: 400 });
+        }
+      }
+    }
     if (path === "/debug") {
       const hw = Array.from(hwControllers.values()).map(h => ({
         name: h.name, eventPath: h.eventPath,
@@ -1206,6 +1309,7 @@ const server = Bun.serve({
     message(ws, data) {
       const d = (ws as any).data;
       if (d.type === "view") return;
+
       if (d.slotIndex !== undefined && (data instanceof ArrayBuffer || data instanceof Uint8Array)) {
         const ab = data instanceof ArrayBuffer ? data : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
         processInput(d.slotIndex, ab);

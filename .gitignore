@@ -6,6 +6,7 @@ kiosk-history.json
 play-history.json
 dolphin-profiles.json
 dolphin-prev-settings.json
+dolphin-hotplug.json
 dolphin/gamecube/roms/
 dolphin/wii/roms/
 uinput-gamepad

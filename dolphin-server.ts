@@ -24,6 +24,23 @@ const CAGE_BIN = "/run/current-system/sw/bin/cage";
 const ENV_BIN = "/run/current-system/sw/bin/env";
 const ROM_EXTENSIONS = new Set([".iso", ".gcm", ".gcz", ".ciso", ".wbfs", ".rvz", ".wia", ".dol", ".elf"]);
 
+// ── Hotplug Mode ────────────────────────────────────────────────────────────
+// When enabled, Dolphin uses Virtual Gamepad devices (via virtual-pad server)
+// instead of direct hardware controllers. This allows hotplugging controllers
+// at any time, even during gameplay.
+const HOTPLUG_FILE = join(BASE_DIR, "dolphin-hotplug.json");
+let hotplugMode = true; // default on
+
+try {
+  if (existsSync(HOTPLUG_FILE)) {
+    hotplugMode = JSON.parse(readFileSync(HOTPLUG_FILE, "utf-8")).enabled ?? true;
+  }
+} catch {}
+
+function saveHotplugMode() {
+  writeFileSync(HOTPLUG_FILE, JSON.stringify({ enabled: hotplugMode }) + "\n");
+}
+
 // ── Process State ───────────────────────────────────────────────────────────
 
 type DolphinState = "idle" | "running" | "dolphin-ui";
@@ -623,6 +640,7 @@ function readSettings(): Settings {
       emulationSpeed: getIniValue(dolphin, "Core", "EmulationSpeed") ?? "1.0",
     },
     controllers,
+    hotplugMode,
   };
 }
 
@@ -657,6 +675,15 @@ function cleanupDolphin(): void {
   dolphinProc = null;
   currentRom = "";
   currentState = "idle";
+  // Disable hw forwarding when Dolphin stops
+  if (hotplugMode) {
+    fetch("https://127.0.0.1:3461/api/hw-forwarding", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+      tls: { rejectUnauthorized: false },
+    }).catch(() => {});
+  }
   restartKiosk();
 }
 
@@ -668,6 +695,100 @@ function cleanupDolphin(): void {
  * Supports up to 4 players. Uses a standard Xbox-like mapping that works for most
  * controllers (GameSir, DS4, Xbox, Pro Controller, 8BitDo, etc.)
  */
+function generateVirtualPadConfig(): void {
+  // Generate INI for Virtual Gamepad 1-4 (stable device names, always present)
+  // Virtual gamepads are Xbox 360-style: ABS_X(0),Y(1),Z(2),RX(3),RY(4),RZ(5),HAT0X(16),HAT0Y(17)
+  // Sequential axis indices: 0=X, 1=Y, 2=Z, 3=RX, 4=RY, 5=RZ, 6=HAT0X, 7=HAT0Y
+  const lines: string[] = [];
+  const wiiLines: string[] = [];
+
+  for (let i = 0; i < 4; i++) {
+    const devName = `Virtual Gamepad ${i + 1}`;
+    lines.push(`[GCPad${i + 1}]`);
+    lines.push(`Device = evdev/0/${devName}`);
+    lines.push(`Buttons/A = \`EAST\``);
+    lines.push(`Buttons/B = \`SOUTH\``);
+    lines.push(`Buttons/X = \`NORTH\``);
+    lines.push(`Buttons/Y = \`WEST\``);
+    lines.push(`Buttons/Z = \`TR\``);
+    lines.push(`Buttons/Start = \`START\``);
+    lines.push(`Main Stick/Up = \`Axis 1-\``);
+    lines.push(`Main Stick/Down = \`Axis 1+\``);
+    lines.push(`Main Stick/Left = \`Axis 0-\``);
+    lines.push(`Main Stick/Right = \`Axis 0+\``);
+    lines.push(`Main Stick/Modifier/Range = 50.0`);
+    lines.push(`Main Stick/Dead Zone = 15.0`);
+    lines.push(`C-Stick/Up = \`Axis 4-\``);
+    lines.push(`C-Stick/Down = \`Axis 4+\``);
+    lines.push(`C-Stick/Left = \`Axis 3-\``);
+    lines.push(`C-Stick/Right = \`Axis 3+\``);
+    lines.push(`C-Stick/Dead Zone = 15.0`);
+    lines.push(`Triggers/L = \`Axis 2+\``);
+    lines.push(`Triggers/R = \`Axis 5+\``);
+    lines.push(`Triggers/L-Analog = \`Axis 2+\``);
+    lines.push(`Triggers/R-Analog = \`Axis 5+\``);
+    lines.push(`D-Pad/Up = \`Axis 7-\``);
+    lines.push(`D-Pad/Down = \`Axis 7+\``);
+    lines.push(`D-Pad/Left = \`Axis 6-\``);
+    lines.push(`D-Pad/Right = \`Axis 6+\``);
+    lines.push(``);
+
+    wiiLines.push(`[Wiimote${i + 1}]`);
+    wiiLines.push(`Device = evdev/0/${devName}`);
+    wiiLines.push(`Buttons/A = \`SOUTH\``);
+    wiiLines.push(`Buttons/B = \`EAST\``);
+    wiiLines.push(`Buttons/- = \`SELECT\``);
+    wiiLines.push(`Buttons/+ = \`START\``);
+    wiiLines.push(`Buttons/Home = \`MODE\``);
+    wiiLines.push(`Buttons/1 = \`NORTH\``);
+    wiiLines.push(`Buttons/2 = \`WEST\``);
+    wiiLines.push(`D-Pad/Up = \`Axis 7-\``);
+    wiiLines.push(`D-Pad/Down = \`Axis 7+\``);
+    wiiLines.push(`D-Pad/Left = \`Axis 6-\``);
+    wiiLines.push(`D-Pad/Right = \`Axis 6+\``);
+    wiiLines.push(`IR/Up = \`Axis 4-\``);
+    wiiLines.push(`IR/Down = \`Axis 4+\``);
+    wiiLines.push(`IR/Left = \`Axis 3-\``);
+    wiiLines.push(`IR/Right = \`Axis 3+\``);
+    wiiLines.push(`Shake/X = \`TL\``);
+    wiiLines.push(`Shake/Y = \`TL\``);
+    wiiLines.push(`Shake/Z = \`TL\``);
+    wiiLines.push(`Extension = Nunchuk`);
+    wiiLines.push(`Nunchuk/Buttons/C = \`Axis 2+\``);
+    wiiLines.push(`Nunchuk/Buttons/Z = \`Axis 5+\``);
+    wiiLines.push(`Nunchuk/Stick/Up = \`Axis 1-\``);
+    wiiLines.push(`Nunchuk/Stick/Down = \`Axis 1+\``);
+    wiiLines.push(`Nunchuk/Stick/Left = \`Axis 0-\``);
+    wiiLines.push(`Nunchuk/Stick/Right = \`Axis 0+\``);
+    wiiLines.push(`Nunchuk/Stick/Dead Zone = 15.0`);
+    wiiLines.push(`Nunchuk/Shake/X = \`TR\``);
+    wiiLines.push(`Nunchuk/Shake/Y = \`TR\``);
+    wiiLines.push(`Nunchuk/Shake/Z = \`TR\``);
+    wiiLines.push(``);
+
+    console.log(`[input] GCPad${i + 1} + Wiimote${i + 1} → ${devName} (hotplug mode)`);
+  }
+
+  writeFileSync(join(CONFIG_DIR, "GCPadNew.ini"), lines.join("\n") + "\n");
+  writeFileSync(join(CONFIG_DIR, "WiimoteNew.ini"), wiiLines.join("\n") + "\n");
+
+  // Ensure all 4 SI (GameCube controller) ports are enabled
+  const dolphinIni = readIniFile("Dolphin.ini");
+  const changes: { file: string; section: string; key: string; value: string }[] = [];
+  for (let i = 0; i < 4; i++) {
+    const current = getIniValue(dolphinIni, "Core", `SIDevice${i}`);
+    if (current !== "6") {
+      changes.push({ file: "Dolphin.ini", section: "Core", key: `SIDevice${i}`, value: "6" });
+    }
+  }
+  if (changes.length > 0) {
+    writeSettings(changes);
+    console.log(`[input] Enabled ${changes.length} GC controller port(s) in Dolphin.ini`);
+  }
+
+  console.log("[input] Generated hotplug configs for 4 Virtual Gamepad slots");
+}
+
 function generateGCPadConfig(): void {
   const inputDevices = readFileSync("/proc/bus/input/devices", "utf-8");
   const blocks = inputDevices.split("\n\n").filter(Boolean);
@@ -829,6 +950,20 @@ function generateGCPadConfig(): void {
   writeFileSync(configPath, lines.join("\n") + "\n");
   console.log(`[input] Generated GCPadNew.ini for ${Math.min(gamepads.length, 4)} controller(s)`);
 
+  // Ensure SI ports are enabled for detected controllers
+  const dolphinIni = readIniFile("Dolphin.ini");
+  const siChanges: { file: string; section: string; key: string; value: string }[] = [];
+  for (let i = 0; i < Math.min(gamepads.length, 4); i++) {
+    const current = getIniValue(dolphinIni, "Core", `SIDevice${i}`);
+    if (current !== "6") {
+      siChanges.push({ file: "Dolphin.ini", section: "Core", key: `SIDevice${i}`, value: "6" });
+    }
+  }
+  if (siChanges.length > 0) {
+    writeSettings(siChanges);
+    console.log(`[input] Enabled ${siChanges.length} GC controller port(s) in Dolphin.ini`);
+  }
+
   // Also generate WiimoteNew.ini for Wii games (emulated Wiimote + Nunchuk)
   const wiiLines: string[] = [];
   for (let i = 0; i < Math.min(gamepads.length, 4); i++) {
@@ -903,9 +1038,24 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
 
   lastError = "";
 
-  // Auto-detect connected controllers and generate GCPadNew.ini
+  // Generate controller config
   try {
-    generateGCPadConfig();
+    if (hotplugMode) {
+      generateVirtualPadConfig();
+      // Enable hw→uinput forwarding on virtual-pad server
+      try {
+        await fetch("https://127.0.0.1:3461/api/hw-forwarding", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: true }),
+          tls: { rejectUnauthorized: false },
+        });
+      } catch (e: any) {
+        console.log("[input] Warning: could not enable hw forwarding on virtual-pad:", e.message);
+      }
+    } else {
+      generateGCPadConfig();
+    }
   } catch (e: any) {
     console.log("[input] Failed to generate controller config:", e.message);
   }
@@ -1260,6 +1410,24 @@ const HTML = `<!DOCTYPE html>
     </div>
   </div>
 
+  <div class="section-title collapsible open" id="controllersToggle" onclick="toggleSection('controllers')">
+    🎮 Controllers <span class="count" id="ctrlCount"></span> <span class="chevron">▾</span>
+  </div>
+  <div class="collapsible-content" id="controllersContent">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;padding:8px 12px;background:#1a1a1a;border-radius:8px;border:1px solid #282828">
+      <div>
+        <div style="font-size:13px;color:#ccc">Dynamic Hotplug</div>
+        <div style="font-size:11px;color:#666;margin-top:2px">Connect/disconnect controllers anytime, even mid-game</div>
+      </div>
+      <label style="position:relative;width:40px;height:22px;cursor:pointer">
+        <input type="checkbox" id="hotplugToggle" onchange="toggleHotplug(this.checked)" style="display:none">
+        <span style="position:absolute;inset:0;background:#333;border-radius:11px;transition:0.2s"></span>
+        <span style="position:absolute;top:2px;left:2px;width:18px;height:18px;background:#666;border-radius:50%;transition:0.2s" id="hotplugKnob"></span>
+      </label>
+    </div>
+    <div id="controllersList"></div>
+  </div>
+
   <div class="section-title collapsible open" id="settingsToggle" onclick="toggleSection('settings')">
     ⚙️ Settings <span id="dirtyBadge" style="display:none;background:#FF9800;color:#000;font-size:10px;padding:1px 6px;border-radius:8px;font-weight:600;letter-spacing:0.3px">UNSAVED</span> <span class="chevron">▾</span>
   </div>
@@ -1273,13 +1441,6 @@ const HTML = `<!DOCTYPE html>
       <div style="font-size:11px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Profiles</div>
       <div class="profiles-grid" id="profilesGrid"></div>
     </div>
-  </div>
-
-  <div class="section-title collapsible" id="controllersToggle" onclick="toggleSection('controllers')">
-    🎮 Controllers <span class="count" id="ctrlCount"></span> <span class="chevron">▾</span>
-  </div>
-  <div class="collapsible-content" id="controllersContent">
-    <div id="controllersList"></div>
   </div>
 </div>
 
@@ -1925,6 +2086,24 @@ async function saveSettings() {
 function renderControllers() {
   if (!settings || !settings.controllers) return;
   const ctrls = settings.controllers;
+  const isHotplug = settings.hotplugMode;
+
+  // Update hotplug toggle
+  const toggle = $('hotplugToggle');
+  const knob = $('hotplugKnob');
+  if (toggle) toggle.checked = isHotplug;
+  if (knob) {
+    knob.style.left = isHotplug ? '20px' : '2px';
+    knob.style.background = isHotplug ? '#4a9eff' : '#666';
+    knob.parentElement.querySelector('span').style.background = isHotplug ? '#1a3a5c' : '#333';
+  }
+
+  if (isHotplug) {
+    $('ctrlCount').textContent = '(hotplug)';
+    $('controllersList').innerHTML = '<div class="platform-empty" style="color:#4a9eff">🔌 Dynamic mode — controllers can be connected anytime.<br><span style="color:#666;font-size:11px">Uses Virtual Gamepad passthrough via the Virtual Pad service.</span></div>';
+    return;
+  }
+
   $('ctrlCount').textContent = '(' + ctrls.length + ' players)';
 
   if (ctrls.length === 0) {
@@ -1941,6 +2120,25 @@ function renderControllers() {
       '</div>';
   }
   $('controllersList').innerHTML = html;
+}
+
+async function toggleHotplug(enabled) {
+  try {
+    const resp = await fetch('/api/hotplug', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast(enabled ? 'Hotplug mode enabled' : 'Hotplug mode disabled');
+      loadSettings();
+    } else {
+      showToast(data.error || 'Failed', 'error');
+    }
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error');
+  }
 }
 
 // ── Poll ──
@@ -2229,6 +2427,23 @@ const server = serve({
         return Response.json({ ok: true });
       } catch (e: any) {
         return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    // API: Hotplug mode
+    if (path === "/api/hotplug") {
+      if (req.method === "GET") {
+        return Response.json({ enabled: hotplugMode });
+      }
+      if (req.method === "POST") {
+        try {
+          const body = await req.json() as { enabled: boolean };
+          hotplugMode = !!body.enabled;
+          saveHotplugMode();
+          return Response.json({ ok: true, enabled: hotplugMode });
+        } catch (e: any) {
+          return Response.json({ ok: false, error: e.message }, { status: 400 });
+        }
       }
     }
 
