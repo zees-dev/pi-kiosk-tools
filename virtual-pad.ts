@@ -522,22 +522,27 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
   html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0a; color: #e0e0e0;
     font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; touch-action: none; user-select: none; }
   .container { display: flex; flex-direction: column; height: 100%; }
-  .status { display: flex; align-items: center; justify-content: space-between; padding: 4px 12px; font-size: 11px; color: #555; flex-shrink: 0; }
-  .status .dot { width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; display: inline-block; }
-  .status .dot.on { background: #4CAF50; }
-  .status .dot.off { background: #f44; }
+
+  /* Status — top right */
+  .status { position: fixed; top: 6px; right: 10px; display: flex; align-items: center; gap: 6px; z-index: 10; }
   .player-badge { background: #222; border: 1px solid #444; border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
   .p1 { color: #4a9eff; border-color: #4a9eff44; }
   .p2 { color: #f44336; border-color: #f4433644; }
   .p3 { color: #4CAF50; border-color: #4CAF5044; }
   .p4 { color: #FFC107; border-color: #FFC10744; }
-  .gamepad-indicator { color: #4a9eff; display: none; }
-  .gamepad-indicator.active { display: inline; }
+  .conn-dot { width: 7px; height: 7px; border-radius: 50%; }
+  .conn-dot.connected { background: #4CAF50; }
+  .conn-dot.connecting { background: #FFC107; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* Gamepad layout */
   .gamepad { flex: 1; display: flex; position: relative; }
   .left { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; }
   .right { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; }
   .center { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; width: 80px; }
   .center-row { display: flex; gap: 6px; }
+
+  /* D-pad */
   .dpad { position: relative; width: 120px; height: 120px; }
   .dpad-btn { position: absolute; background: #1a1a1a; border: 1px solid #333; display: flex; align-items: center; justify-content: center; font-size: 18px; color: #888; transition: background 0.05s; }
   .dpad-btn.pressed { background: #333; color: #fff; }
@@ -546,10 +551,14 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
   .dpad-left { top: 36px; left: 0; width: 48px; height: 48px; border-radius: 8px 0 0 8px; }
   .dpad-right { top: 36px; right: 0; width: 48px; height: 48px; border-radius: 0 8px 8px 0; }
   .dpad-center { top: 36px; left: 36px; width: 48px; height: 48px; background: #151515; border: none; }
+
+  /* Sticks */
   .stick-zone { width: 120px; height: 120px; background: #141414; border: 2px solid #282828; border-radius: 50%; position: relative; }
   .stick-thumb { width: 50px; height: 50px; background: #333; border: 2px solid #444; border-radius: 50%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); transition: background 0.05s; }
   .stick-thumb.active { background: #4a9eff; border-color: #5ab0ff; }
   .stick-label { font-size: 10px; color: #444; text-align: center; }
+
+  /* Face buttons */
   .face-buttons { position: relative; width: 130px; height: 130px; }
   .face-btn { position: absolute; width: 46px; height: 46px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; border: 2px solid; transition: background 0.05s; }
   .face-btn.pressed { filter: brightness(1.5); }
@@ -557,6 +566,8 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
   .face-b { top: 42px; right: 0; background: #3a1a1a; border-color: #f44336; color: #f44336; }
   .face-x { top: 42px; left: 0; background: #1a1a3a; border-color: #2196F3; color: #2196F3; }
   .face-y { top: 0; left: 42px; background: #3a3a1a; border-color: #FFC107; color: #FFC107; }
+
+  /* Shoulders */
   .shoulders { display: flex; justify-content: space-between; padding: 0 8px; flex-shrink: 0; }
   .shoulder-group { display: flex; gap: 4px; }
   .shoulder-btn { padding: 10px 18px; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; font-size: 12px; font-weight: 600; color: #888; transition: background 0.05s; }
@@ -564,9 +575,12 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
   .trigger-btn { padding: 10px 18px; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; font-size: 12px; font-weight: 600; color: #888; position: relative; overflow: hidden; }
   .trigger-btn .fill { position: absolute; bottom: 0; left: 0; right: 0; background: #4a9eff33; transition: height 0.05s; }
   .trigger-btn.pressed { background: #222; color: #fff; }
+
+  /* Small center buttons */
   .sm-btn { width: 32px; height: 24px; background: #1a1a1a; border: 1px solid #333; border-radius: 12px; font-size: 9px; font-weight: 600; color: #666; display: flex; align-items: center; justify-content: center; }
   .sm-btn.pressed { background: #333; color: #fff; }
   .home-btn { width: 28px; height: 28px; border-radius: 50%; font-size: 12px; }
+
   @media (orientation: portrait) {
     .gamepad { flex-direction: column; }
     .left, .right { flex-direction: row; }
@@ -575,14 +589,20 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <div class="container">
+  <!-- Status: top-right player badge + connection dot -->
+  <div class="status">
+    <span class="player-badge" id="playerBadge">P?</span>
+    <span class="conn-dot connecting" id="connDot"></span>
+  </div>
+
   <div class="shoulders">
     <div class="shoulder-group">
-      <div class="trigger-btn" data-btn="6" id="btnL2"><div class="fill" id="fillL2"></div>L2</div>
-      <div class="shoulder-btn" data-btn="4" id="btnL1">L1</div>
+      <div class="trigger-btn" data-btn="6"><div class="fill" id="fillL2"></div>L2</div>
+      <div class="shoulder-btn" data-btn="4">L1</div>
     </div>
     <div class="shoulder-group">
-      <div class="shoulder-btn" data-btn="5" id="btnR1">R1</div>
-      <div class="trigger-btn" data-btn="7" id="btnR2"><div class="fill" id="fillR2"></div>R2</div>
+      <div class="shoulder-btn" data-btn="5">R1</div>
+      <div class="trigger-btn" data-btn="7"><div class="fill" id="fillR2"></div>R2</div>
     </div>
   </div>
   <div class="gamepad">
@@ -601,13 +621,13 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
     </div>
     <div class="center">
       <div class="center-row">
-        <div class="sm-btn" data-btn="8" id="btnSelect">SEL</div>
-        <div class="sm-btn home-btn" data-btn="16" id="btnHome">⊙</div>
-        <div class="sm-btn" data-btn="9" id="btnStart">STR</div>
+        <div class="sm-btn" data-btn="8">SEL</div>
+        <div class="sm-btn home-btn" data-btn="16">⊙</div>
+        <div class="sm-btn" data-btn="9">STR</div>
       </div>
       <div class="center-row">
-        <div class="sm-btn" data-btn="10" id="btnL3">L3</div>
-        <div class="sm-btn" data-btn="11" id="btnR3">R3</div>
+        <div class="sm-btn" data-btn="10">L3</div>
+        <div class="sm-btn" data-btn="11">R3</div>
       </div>
     </div>
     <div class="right">
@@ -623,54 +643,78 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
       </div>
     </div>
   </div>
-  <div class="status">
-    <span><span class="dot" id="wsDot"></span><span id="wsText">Connecting...</span></span>
-    <span class="player-badge" id="playerBadge">P?</span>
-    <span class="gamepad-indicator" id="gpIndicator">🎮 Gamepad</span>
-  </div>
 </div>
+
 <script>
-const $ = id => document.getElementById(id);
-let ws = null, buttons = 0;
-let lx = 128, ly = 128, rx = 128, ry = 128, l2 = 0, r2 = 0;
-const buf = new ArrayBuffer(10), dv = new DataView(buf);
-let myPlayer = null;
-const params = new URLSearchParams(location.search);
-const wantPlayer = parseInt(params.get('player') || params.get('p') || '0');
+// ═══════════════════════════════════════════════════════════════
+// NETWORK LAYER — binary WebSocket, player assignment, reconnect
+// ═══════════════════════════════════════════════════════════════
+const net = (() => {
+  const buf = new ArrayBuffer(10), dv = new DataView(buf);
+  const params = new URLSearchParams(location.search);
+  const wantP = parseInt(params.get('player') || params.get('p') || '0');
+  let ws = null, player = null;
+  const cbs = { assign: [], kick: [], state: [] };
 
-function connect() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(proto + '//' + location.host + '/ws' + (wantPlayer ? '?player=' + wantPlayer : ''));
-  ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { $('wsDot').className = 'dot on'; $('wsText').textContent = 'Connected'; };
-  ws.onclose = () => { $('wsDot').className = 'dot off'; $('wsText').textContent = 'Reconnecting...'; myPlayer = null; setTimeout(connect, 1000); };
-  ws.onerror = () => ws.close();
-  ws.onmessage = (e) => {
-    if (typeof e.data === 'string') {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'assigned') {
-        myPlayer = msg.player;
-        const badge = $('playerBadge');
-        badge.textContent = 'P' + myPlayer;
-        badge.className = 'player-badge p' + myPlayer;
-      } else if (msg.type === 'kicked') { myPlayer = null; ws.close(); }
-    }
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/ws' + (wantP ? '?player=' + wantP : ''));
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => cbs.state.forEach(f => f('connected'));
+    ws.onclose = () => { cbs.state.forEach(f => f('connecting')); player = null; setTimeout(connect, 1000); };
+    ws.onerror = () => ws.close();
+    ws.onmessage = e => {
+      if (typeof e.data === 'string') {
+        const m = JSON.parse(e.data);
+        if (m.type === 'assigned') { player = m.player; cbs.assign.forEach(f => f(player)); }
+        else if (m.type === 'kicked') { player = null; cbs.kick.forEach(f => f()); ws.close(); }
+      }
+    };
+  }
+  connect();
+
+  return {
+    send(buttons, lx, ly, rx, ry, l2, r2) {
+      if (!ws || ws.readyState !== 1) return;
+      dv.setUint32(0, buttons, true);
+      dv.setUint8(4, lx); dv.setUint8(5, ly); dv.setUint8(6, rx); dv.setUint8(7, ry);
+      dv.setUint8(8, l2); dv.setUint8(9, r2);
+      ws.send(buf);
+    },
+    onAssign(fn) { cbs.assign.push(fn); },
+    onKick(fn) { cbs.kick.push(fn); },
+    onState(fn) { cbs.state.push(fn); },
+    get player() { return player; },
   };
-}
-connect();
+})();
 
-function send() {
-  if (!ws || ws.readyState !== 1) return;
-  dv.setUint32(0, buttons, true);
-  dv.setUint8(4, lx); dv.setUint8(5, ly); dv.setUint8(6, rx); dv.setUint8(7, ry);
-  dv.setUint8(8, l2); dv.setUint8(9, r2);
-  ws.send(buf);
-}
+// ═══════════════════════════════════════════════════════════════
+// INPUT STATE — shared mutable state, either touch or gamepad
+// ═══════════════════════════════════════════════════════════════
+let buttons = 0, lx = 128, ly = 128, rx = 128, ry = 128, l2 = 0, r2 = 0;
+let touchBtns = 0; // bits currently held by touch UI
 
+function flush() { net.send(buttons, lx, ly, rx, ry, l2, r2); }
+
+// ═══════════════════════════════════════════════════════════════
+// STATUS UI — top-right badge + dot
+// ═══════════════════════════════════════════════════════════════
+const badge = document.getElementById('playerBadge');
+const dot = document.getElementById('connDot');
+net.onAssign(p => { badge.textContent = 'P' + p; badge.className = 'player-badge p' + p; });
+net.onState(s => { dot.className = 'conn-dot ' + s; });
+
+// ═══════════════════════════════════════════════════════════════
+// TOUCH UI — buttons, sticks, triggers
+// ═══════════════════════════════════════════════════════════════
 function setBtn(bit, on) {
-  if (on) buttons |= (1 << bit); else buttons &= ~(1 << bit);
+  // Track touch-owned bits separately so gamepad can clear its own
+  if (on) { buttons |= (1 << bit); touchBtns |= (1 << bit); }
+  else { buttons &= ~(1 << bit); touchBtns &= ~(1 << bit); }
   document.querySelector('[data-btn="'+bit+'"]')?.classList.toggle('pressed', on);
-  send();
+  if (bit === 6) { l2 = on ? 255 : 0; document.getElementById('fillL2').style.height = (on ? '100' : '0') + '%'; }
+  if (bit === 7) { r2 = on ? 255 : 0; document.getElementById('fillR2').style.height = (on ? '100' : '0') + '%'; }
+  flush();
 }
 
 document.querySelectorAll('[data-btn]').forEach(el => {
@@ -684,7 +728,7 @@ document.querySelectorAll('[data-btn]').forEach(el => {
 });
 
 function setupStick(zoneId, thumbId, isRight, clickBit) {
-  const zone = $(zoneId), thumb = $(thumbId), maxD = 35;
+  const zone = document.getElementById(zoneId), thumb = document.getElementById(thumbId), maxD = 35;
   let active = false, tid = null;
   function upd(cx2, cy2) {
     const r = zone.getBoundingClientRect(), cx = r.left + r.width/2, cy = r.top + r.height/2;
@@ -693,12 +737,12 @@ function setupStick(zoneId, thumbId, isRight, clickBit) {
     thumb.style.transform = 'translate(calc(-50% + '+dx+'px),calc(-50% + '+dy+'px))';
     const nx = Math.round(128+(dx/maxD)*127), ny = Math.round(128+(dy/maxD)*127);
     if (isRight) { rx=nx; ry=ny; } else { lx=nx; ly=ny; }
-    send();
+    flush();
   }
   function rst() {
     thumb.style.transform = 'translate(-50%,-50%)'; thumb.classList.remove('active');
     if (isRight) { rx=128; ry=128; } else { lx=128; ly=128; }
-    active=false; tid=null; send();
+    active=false; tid=null; flush();
   }
   zone.addEventListener('touchstart', e => { e.preventDefault(); const t=e.changedTouches[0]; tid=t.identifier; active=true; thumb.classList.add('active'); upd(t.clientX,t.clientY); }, {passive:false});
   zone.addEventListener('touchmove', e => { e.preventDefault(); for(const t of e.changedTouches) if(t.identifier===tid){upd(t.clientX,t.clientY);break;} }, {passive:false});
@@ -712,31 +756,51 @@ function setupStick(zoneId, thumbId, isRight, clickBit) {
 setupStick('stickL','thumbL',false,10);
 setupStick('stickR','thumbR',true,11);
 
-let gpOn=false, gpPB=0, gpPA=[128,128,128,128,0,0];
-function pollGP() {
-  const gps=navigator.getGamepads?navigator.getGamepads():[];
-  let gp=null; for(const g of gps) if(g&&g.connected){gp=g;break;}
-  if(gp){
-    if(!gpOn){gpOn=true;$('gpIndicator').classList.add('active');}
-    let gb=0; for(let i=0;i<Math.min(gp.buttons.length,17);i++) if(gp.buttons[i].pressed) gb|=(1<<i);
-    const glx=Math.round(128+gp.axes[0]*127),gly=Math.round(128+gp.axes[1]*127);
-    const grx=gp.axes.length>2?Math.round(128+gp.axes[2]*127):128;
-    const gry=gp.axes.length>3?Math.round(128+gp.axes[3]*127):128;
-    const gl2=Math.round(gp.buttons[6]?gp.buttons[6].value*255:0);
-    const gr2=Math.round(gp.buttons[7]?gp.buttons[7].value*255:0);
-    buttons|=gb; if(glx!==128||gly!==128){lx=glx;ly=gly;} if(grx!==128||gry!==128){rx=grx;ry=gry;}
-    if(gl2>0)l2=gl2; if(gr2>0)r2=gr2;
-    $('fillL2').style.height=(gl2/255*100)+'%'; $('fillR2').style.height=(gr2/255*100)+'%';
-    const ca=[lx,ly,rx,ry,l2,r2]; let ch=gb!==gpPB;
-    if(!ch) for(let i=0;i<6;i++) if(ca[i]!==gpPA[i]){ch=true;break;}
-    if(ch){for(let i=0;i<17;i++){const el=document.querySelector('[data-btn="'+i+'"]');if(el)el.classList.toggle('pressed',!!(gb&(1<<i)));}send();gpPB=gb;gpPA=ca;}
-  } else if(gpOn){gpOn=false;$('gpIndicator').classList.remove('active');}
-  requestAnimationFrame(pollGP);
+// ═══════════════════════════════════════════════════════════════
+// GAMEPAD API — forward physical controller connected to phone
+// Gamepad fully owns state when active (replaces, not ORs)
+// Touch inputs merge on top via setBtn which sets individual bits
+// ═══════════════════════════════════════════════════════════════
+let gpPrevB = 0, gpPrevA = [128,128,128,128,0,0];
+
+function pollGamepad() {
+  const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+  let gp = null;
+  for (const g of gps) { if (g && g.connected) { gp = g; break; } }
+  if (gp) {
+    let gb = 0;
+    for (let i = 0; i < Math.min(gp.buttons.length, 17); i++) if (gp.buttons[i].pressed) gb |= (1 << i);
+    const a = [
+      Math.round(128 + gp.axes[0] * 127), Math.round(128 + gp.axes[1] * 127),
+      gp.axes.length > 2 ? Math.round(128 + gp.axes[2] * 127) : 128,
+      gp.axes.length > 3 ? Math.round(128 + gp.axes[3] * 127) : 128,
+      Math.round((gp.buttons[6] ? gp.buttons[6].value : 0) * 255),
+      Math.round((gp.buttons[7] ? gp.buttons[7].value : 0) * 255),
+    ];
+    let changed = gb !== gpPrevB;
+    if (!changed) for (let i = 0; i < 6; i++) if (a[i] !== gpPrevA[i]) { changed = true; break; }
+    if (changed) {
+      // Gamepad replaces state; touch buttons merge on top
+      buttons = gb | touchBtns;
+      lx = a[0]; ly = a[1]; rx = a[2]; ry = a[3]; l2 = a[4]; r2 = a[5];
+      document.getElementById('fillL2').style.height = (a[4]/255*100)+'%';
+      document.getElementById('fillR2').style.height = (a[5]/255*100)+'%';
+      for (let i = 0; i < 17; i++) {
+        document.querySelector('[data-btn="'+i+'"]')?.classList.toggle('pressed', !!(buttons & (1<<i)));
+      }
+      flush();
+      gpPrevB = gb; gpPrevA = a;
+    }
+  }
+  requestAnimationFrame(pollGamepad);
 }
-requestAnimationFrame(pollGP);
-window.addEventListener('gamepadconnected',()=>{}); window.addEventListener('gamepaddisconnected',()=>{});
+requestAnimationFrame(pollGamepad);
+window.addEventListener('gamepadconnected', () => {});
+window.addEventListener('gamepaddisconnected', () => {});
+
+// Prevent zoom/scroll
 document.addEventListener('touchmove', e => e.preventDefault(), {passive:false});
-if(screen.orientation&&screen.orientation.lock) screen.orientation.lock('landscape').catch(()=>{});
+if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(()=>{});
 </script>
 </body>
 </html>`;
@@ -1023,8 +1087,10 @@ const server = Bun.serve({
     message(ws, data) {
       const d = (ws as any).data;
       if (d.type === "view") return;
-      if (data instanceof ArrayBuffer && d.slotIndex !== undefined) {
-        processInput(d.slotIndex, data);
+      if (d.slotIndex !== undefined && (data instanceof ArrayBuffer || data instanceof Uint8Array)) {
+        // Bun delivers binary as Buffer (Uint8Array), normalize to ArrayBuffer
+        const ab = data instanceof ArrayBuffer ? data : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+        processInput(d.slotIndex, ab);
       }
     },
     close(ws) {
