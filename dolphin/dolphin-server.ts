@@ -1496,6 +1496,9 @@ const HTML = `<!DOCTYPE html>
   .save-btn:active { background: #2a7edf; }
   .save-btn:disabled { background: #333; color: #666; cursor: not-allowed; }
   .save-btn.saved { background: #2e7d32; }
+  .defaults-btn { background: none; border: 1px solid #333; color: #888; border-radius: 8px; padding: 10px 14px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; }
+  .defaults-btn:hover:not(:disabled) { border-color: #f4433688; color: #f44336; }
+  .defaults-btn:disabled { opacity: 0.3; cursor: not-allowed; }
   .revert-btn { background: transparent; color: #aaa; border: 1px solid #333; border-radius: 8px; padding: 10px 16px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; }
   .revert-btn:hover { border-color: #FF9800; color: #FF9800; }
   .revert-btn:disabled { opacity: 0.3; cursor: not-allowed; }
@@ -1602,6 +1605,8 @@ const HTML = `<!DOCTYPE html>
   <div class="collapsible-content" id="settingsContent">
     <div id="settingsForm"></div>
     <div class="save-bar">
+      <button class="defaults-btn" id="defaultsBtn" onclick="resetDefaults()">Defaults</button>
+      <div style="flex:1"></div>
       <button class="revert-btn" id="revertBtn" onclick="revertSettings()" disabled>↩ Revert</button>
       <button class="save-btn" id="saveBtn" onclick="saveSettings()">Save Settings</button>
     </div>
@@ -2070,6 +2075,19 @@ function setDirty(dirty) {
   $('dirtyBadge').style.display = dirty ? 'inline' : 'none';
   $('saveBtn').disabled = !dirty;
   $('saveBtn').textContent = dirty ? 'Save Settings' : 'Settings Saved';
+  // Disable defaults button if all settings already match defaults
+  const defBtn = $('defaultsBtn');
+  if (defBtn) {
+    let isDefault = true;
+    document.querySelectorAll('[data-key]').forEach(el => {
+      const key = el.dataset.key;
+      const def = DOLPHIN_DEFAULTS[key];
+      if (def === undefined) return;
+      if (el.type === 'checkbox') { if (el.checked !== !!def) isDefault = false; }
+      else { if (el.value !== String(def)) isDefault = false; }
+    });
+    defBtn.disabled = isDefault;
+  }
 }
 
 function renderSettings() {
@@ -2181,6 +2199,43 @@ function settingSlider(label, key, value, min, max, step) {
     '<div style="display:flex;align-items:center;gap:8px">' +
     '<input type="range" data-key="' + key + '" min="' + min + '" max="' + max + '" step="' + step + '" value="' + value + '">' +
     '<span class="oc-value">' + value.toFixed(1) + 'x</span></div></div>';
+}
+
+const DOLPHIN_DEFAULTS = {
+  'dolphin.gfxBackend': 'Vulkan',
+  'gfx.efbScale': '2', 'gfx.msaa': '0x00000000', 'gfx.maxAnisotropy': '0',
+  'gfx.showFps': false, 'gfx.vsync': false,
+  'dolphin.cpuCore': '1', 'dolphin.fullscreen': true,
+  'dolphin.overclockEnable': false, 'dolphin.overclock': '1.0',
+  'gfx.shaderCompilationMode': '0', 'gfx.waitForShaders': false,
+  'gfx.fastDepthCalc': true, 'gfx.backendMultithreading': true,
+  'gfx.enablePixelLighting': false, 'gfx.efbAccessEnable': false,
+  'gfx.efbAccessDeferInvalidation': false, 'gfx.bboxEnable': false,
+  'dolphin.dspHle': true, 'dolphin.cpuThread': true,
+  'dolphin.skipIdle': true, 'dolphin.syncGpu': false,
+  'dolphin.syncGpuOnSkipIdle': true, 'dolphin.fastmem': true,
+  'dolphin.mmu': false, 'dolphin.fprf': false,
+  'dolphin.audioStretching': true, 'dolphin.emulationSpeed': '1.0',
+};
+
+function resetDefaults() {
+  if (!confirm('Reset all settings to defaults? You will still need to Save to apply.')) return;
+  document.querySelectorAll('[data-key]').forEach(el => {
+    const key = el.dataset.key;
+    const def = DOLPHIN_DEFAULTS[key];
+    if (def === undefined) return;
+    if (el.type === 'checkbox') {
+      el.checked = !!def;
+    } else if (el.type === 'range') {
+      el.value = def;
+      const valSpan = el.parentElement.querySelector('.oc-value');
+      if (valSpan) valSpan.textContent = parseFloat(def).toFixed(1) + 'x';
+    } else {
+      el.value = def;
+    }
+  });
+  setDirty(true);
+  showToast('Settings reset to defaults — press Save to apply');
 }
 
 async function saveSettings() {

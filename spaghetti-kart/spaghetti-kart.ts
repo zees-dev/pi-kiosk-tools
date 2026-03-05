@@ -116,7 +116,7 @@ interface Setting {
 const SETTINGS: Setting[] = [
   // Graphics
   { key: "gInterpolationFPS", label: "FPS", type: "snap-slider", section: "Graphics", min: 20, max: 240, step: 1, snaps: [45, 60, 120, 144, 240], default: 60, tooltip: "Interpolation FPS target", disabledBy: "gMatchRefreshRate" },
-  { key: "gMatchRefreshRate", label: "Match Refresh Rate", type: "toggle", section: "Graphics", default: 0, tooltip: "Match FPS to display refresh rate (overrides FPS slider)" },
+  { key: "gMatchRefreshRate", label: "Match Refresh Rate", type: "toggle", section: "Graphics", default: 0, tooltip: "Match FPS to display refresh rate (overrides FPS slider)", dynamicLabel: true },
   { key: "gVsyncEnabled", label: "VSync", type: "toggle", section: "Graphics", default: 1, tooltip: "Enable vertical sync" },
   { key: "gTextureFilter", label: "Texture Filter", type: "select", section: "Graphics", default: 0, options: [
     { value: 0, label: "Nearest" }, { value: 1, label: "Linear" }, { value: 2, label: "3-Point" }
@@ -414,6 +414,9 @@ select{background:#282828;color:#e0e0e0;border:1px solid #333;border-radius:6px;
 .dropdown-body.open{display:block}
 .profiles-section{margin-top:4px;margin-bottom:20px}
 .profiles-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.defaults-btn{background:none;border:1px solid #333;color:#888;border-radius:8px;padding:8px 14px;font-size:12px;font-weight:500;cursor:pointer;transition:all .15s}
+.defaults-btn:hover:not(:disabled){border-color:#f4433688;color:#f44336}
+.defaults-btn:disabled{opacity:0.3;cursor:not-allowed}
 .save-btn{background:#4a9eff;color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;display:none}
 .save-btn:hover{background:#3a8eef}
 .save-btn.visible{display:inline-block}
@@ -478,7 +481,7 @@ select{background:#282828;color:#e0e0e0;border:1px solid #333;border-radius:6px;
   <div class="dropdown-body" id="rulesetsBody"></div>
 </div>
 
-<div class="section-title" style="justify-content:space-between"><span>Profiles</span><button class="save-btn" id="saveBtn" onclick="saveSettings()">Save Changes</button></div>
+<div class="section-title" style="justify-content:space-between"><span>Profiles</span><div style="display:flex;gap:8px;align-items:center"><button class="defaults-btn" id="defaultsBtn" onclick="resetDefaults()">Defaults</button><button class="save-btn" id="saveBtn" onclick="saveSettings()">Save Changes</button></div></div>
 <div class="profiles-section">
   <div class="profiles-row">
     <button class="revert-btn" id="revertBtn" onclick="revertSettings()" ${prevSettings ? "" : "disabled"}>↩ Revert</button>
@@ -512,21 +515,23 @@ let savedSettings = JSON.parse(JSON.stringify(currentSettings));
 let hasUnsaved = false;
 
 function checkDirty() {
-  // Orange dot: differs from defaults
-  let diffFromDefaults = false;
-  for (const key in DEFAULTS) {
-    if (currentSettings[key] !== undefined && currentSettings[key] !== DEFAULTS[key]) { diffFromDefaults = true; break; }
-  }
-  const dot = $('dirtyDot');
-  if (dot) dot.className = 'dirty-dot' + (diffFromDefaults ? ' visible' : '');
-
-  // Save button: differs from last saved state
+  // Check for unsaved changes (differs from last saved state)
   hasUnsaved = false;
   for (const key in savedSettings) {
     if (currentSettings[key] !== savedSettings[key]) { hasUnsaved = true; break; }
   }
+  const dot = $('dirtyDot');
+  if (dot) dot.className = 'dirty-dot' + (hasUnsaved ? ' visible' : '');
   const btn = $('saveBtn');
   if (btn) btn.className = 'save-btn' + (hasUnsaved ? ' visible' : '');
+
+  // Disable defaults button if all settings already match defaults
+  let isDefault = true;
+  for (const key in DEFAULTS) {
+    if (currentSettings[key] !== undefined && currentSettings[key] !== DEFAULTS[key]) { isDefault = false; break; }
+  }
+  const defBtn = $('defaultsBtn');
+  if (defBtn) defBtn.disabled = isDefault;
 }
 
 // ── Setting renderers ─────────────────────────────────────────────────────
@@ -603,6 +608,20 @@ async function saveSettings() {
     } else showToast(data.error || 'Save failed', 'error');
   } catch { showToast('Save failed', 'error'); }
   if (btn) { btn.disabled = false; btn.textContent = 'Save Changes'; }
+}
+
+async function resetDefaults() {
+  if (!confirm('Reset all settings to defaults? This will save immediately.')) return;
+  try {
+    const resp = await fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ settings: JSON.parse(JSON.stringify(DEFAULTS)) }) });
+    const data = await resp.json();
+    if (data.ok) {
+      currentSettings = JSON.parse(JSON.stringify(DEFAULTS));
+      savedSettings = JSON.parse(JSON.stringify(DEFAULTS));
+      renderAllSettings();
+      showToast('Settings reset to defaults');
+    } else showToast(data.error || 'Reset failed', 'error');
+  } catch { showToast('Reset failed', 'error'); }
 }
 
 function setSnap(key, value) {
@@ -726,6 +745,17 @@ async function pollControllers() {
 pollControllers();
 setInterval(pollControllers, 2000);
 
+// Fetch display refresh rate and update Match Refresh Rate label
+fetch('http://' + location.hostname + '/api/display').then(r => r.json()).then(d => {
+  if (d.currentHz) {
+    const row = document.querySelector('[data-key="gMatchRefreshRate"]');
+    if (row) {
+      const label = row.querySelector('.setting-label');
+      if (label) label.textContent = 'Match Refresh Rate (' + d.currentHz + ' Hz)';
+    }
+  }
+}).catch(() => {});
+
 // ── Init ──────────────────────────────────────────────────────────────────
 renderAllSettings();
 
@@ -740,6 +770,19 @@ setInterval(async () => {
     if (text) text.textContent = d.running ? 'Running' : 'Stopped';
   } catch {}
 }, 5000);
+
+// Reset unsaved changes on bfcache restore or page reload
+window.addEventListener('pageshow', async (e) => {
+  if (e.persisted) {
+    try {
+      const r = await fetch('/api/settings');
+      const saved = await r.json();
+      currentSettings = saved;
+      savedSettings = JSON.parse(JSON.stringify(saved));
+      renderAllSettings();
+    } catch {}
+  }
+});
 </script>
 </body></html>`;
 }
@@ -915,7 +958,7 @@ serve({
 
     // Serve main page
     if (url.pathname === "/" || url.pathname === "/index.html") {
-      return new Response(renderPage(), { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      return new Response(renderPage(), { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
     }
 
     return new Response("Not found", { status: 404 });
