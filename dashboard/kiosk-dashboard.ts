@@ -373,28 +373,33 @@ interface App {
   description: string;
   diagnosticsUrl?: string;
   action?: string;
+  section?: string;
+  external?: boolean;
 }
 
 function getApps(): App[] {
   const ip = getLanIp();
   const mode = getKioskMode();
   const apps: App[] = [
-    { id: "retrobox", name: "Retrobox", icon: "🕹️", url: `https://${ip}:3334`, description: "Retro gaming emulator" },
-    { id: "dolphin", name: "Dolphin", icon: "🐬", url: `http://${ip}:3460`, description: "GameCube / Wii emulator" },
+    // Games
+    { id: "retrobox", name: "Retrobox", icon: "🕹️", url: `https://${ip}:3334`, description: "Retro gaming emulator", section: "games" },
+    { id: "dolphin", name: "Dolphin", icon: "🐬", url: `http://${ip}:3460`, description: "GameCube / Wii emulator", section: "games" },
+    { id: "spaghettikart", name: "Spaghetti Kart", icon: "🍝", url: `http://${ip}:3462`, description: "Mario Kart 64 PC port", section: "games" },
   ];
 
   if (mode === "moonlight") {
-    apps.unshift({ id: "moonlight-stop", name: "Stop Moonlight", icon: "🛑", url: "", description: "Return to RetroBox kiosk", action: "stop-moonlight" });
+    apps.unshift({ id: "moonlight-stop", name: "Stop Moonlight", icon: "🛑", url: "", description: "Return to RetroBox kiosk", action: "stop-moonlight", section: "games" });
   } else {
-    apps.push({ id: "moonlight", name: "Moonlight", icon: "🌙", url: "", description: "Stream from MacBook Pro", action: "start-moonlight" });
+    apps.push({ id: "moonlight", name: "Moonlight", icon: "🌙", url: "", description: "Stream from MacBook Pro", action: "start-moonlight", section: "games" });
   }
 
   apps.push(
-    { id: "wifi", name: "WiFi Manager", icon: "📶", url: `http://${ip}:3457`, description: "Network settings", diagnosticsUrl: `http://${ip}:3457/api/diagnostics` },
-    { id: "bluetooth", name: "Bluetooth", icon: "🔵", url: `http://${ip}:3456`, description: "Controller pairing", diagnosticsUrl: `http://${ip}:3456/api/diagnostics` },
-    { id: "remotepad", name: "RemotePad", icon: "🎮", url: `http://${ip}:3458`, description: "PS4 controller bridge", diagnosticsUrl: `http://${ip}:3458/api/diagnostics` },
-    { id: "virtualpad", name: "Virtual Pad", icon: "🎮", url: `https://${ip}:3461/view`, description: "Web-based game controller" },
-    { id: "vnc", name: "VNC", icon: "📺", url: `http://${ip}:6080/vnc.html?host=${ip}&port=6080&autoconnect=true&resize=scale&quality=6&show_dot=true&view_clip=true`, description: "View kiosk display remotely", external: true },
+    // Apps
+    { id: "virtualpad", name: "Virtual Pad", icon: "🎮", url: `https://${ip}:3461/view`, description: "Web-based game controller", section: "apps" },
+    { id: "wifi", name: "WiFi Manager", icon: "📶", url: `http://${ip}:3457`, description: "Network settings", diagnosticsUrl: `http://${ip}:3457/api/diagnostics`, section: "apps" },
+    { id: "bluetooth", name: "Bluetooth", icon: "🔵", url: `http://${ip}:3456`, description: "Controller pairing", diagnosticsUrl: `http://${ip}:3456/api/diagnostics`, section: "apps" },
+    { id: "vnc", name: "VNC", icon: "📺", url: `http://${ip}:6080/vnc.html?host=${ip}&port=6080&autoconnect=true&resize=scale&quality=6&show_dot=true&view_clip=true`, description: "View kiosk display remotely", external: true, section: "apps" },
+    { id: "remotepad", name: "RemotePad", icon: "🎮", url: `http://${ip}:3458`, description: "PS4 controller bridge", diagnosticsUrl: `http://${ip}:3458/api/diagnostics`, section: "apps" },
   );
   return apps;
 }
@@ -850,6 +855,9 @@ const HTML = `<!DOCTYPE html>
   <div class="remote-btn" id="remoteBtn">🖱️ Remote Input</div>
   <div class="remote-btn" id="avBtn">🔊 Display & Audio</div>
 
+
+  <div class="section-title">Games</div>
+  <div class="app-grid" id="gamesGrid"></div>
 
   <div class="section-title">Apps</div>
   <div class="app-grid" id="appGrid"></div>
@@ -1369,7 +1377,7 @@ let diagCache = {};
 
 function formatDiag(app, diag) {
   // Check service status first
-  const appServiceMap = { retrobox: 'retrobox', dolphin: 'dolphin-manager', wifi: 'wifi-manager', bluetooth: 'bluetooth-manager', remotepad: 'remote-pad', virtualpad: 'virtual-pad', vnc: 'vnc' };
+  const appServiceMap = { retrobox: 'retrobox', dolphin: 'dolphin-manager', wifi: 'wifi-manager', bluetooth: 'bluetooth-manager', remotepad: 'remote-pad', virtualpad: 'virtual-pad', spaghettikart: 'spaghetti-kart', vnc: 'vnc' };
   const svcName = appServiceMap[app.id];
   const svcInfo = svcName && window._serviceMap ? window._serviceMap[svcName] : null;
   if (svcInfo && !svcInfo.active) return '<div class="diag"><div class="diag-line diag-off">Service disabled</div></div>';
@@ -1404,12 +1412,14 @@ function formatDiag(app, diag) {
 }
 
 function renderApps(kioskUrl) {
+  const gamesGrid = $('gamesGrid');
   appGrid.innerHTML = '';
+  if (gamesGrid) gamesGrid.innerHTML = '';
   for (const app of apps) {
     const card = document.createElement('div');
     const isActive = kioskUrl && app.url && kioskUrl.startsWith(app.url);
     const isMoonlightStop = app.action === 'stop-moonlight';
-    const appServiceMap = { retrobox: 'retrobox', dolphin: 'dolphin-manager', wifi: 'wifi-manager', bluetooth: 'bluetooth-manager', remotepad: 'remote-pad', virtualpad: 'virtual-pad', vnc: 'vnc' };
+    const appServiceMap = { retrobox: 'retrobox', dolphin: 'dolphin-manager', wifi: 'wifi-manager', bluetooth: 'bluetooth-manager', remotepad: 'remote-pad', virtualpad: 'virtual-pad', spaghettikart: 'spaghetti-kart', vnc: 'vnc' };
     const svcName = appServiceMap[app.id];
     const svcInfo = svcName && window._serviceMap ? window._serviceMap[svcName] : null;
     const isDisabled = svcInfo ? !svcInfo.active : false;
@@ -1429,7 +1439,8 @@ function renderApps(kioskUrl) {
     } else {
       card.onclick = (e) => { if (!e.target.closest('.open-link')) navigate(app.url, false); };
     }
-    appGrid.appendChild(card);
+    const target = (app.section === 'games' && gamesGrid) ? gamesGrid : appGrid;
+    target.appendChild(card);
   }
 }
 

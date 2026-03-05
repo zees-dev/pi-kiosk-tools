@@ -17,6 +17,11 @@ dolphin/dolphin-hotplug.json
 dolphin/data/gamecube/roms/
 dolphin/data/wii/roms/
 
+# SpaghettiKart data
+spaghetti-kart/sk-profiles.json
+spaghetti-kart/sk-prev-settings.json
+
 # Compiled binaries
 dashboard/uinput-mouse
 virtual-pad/uinput-gamepad
+device-names.json

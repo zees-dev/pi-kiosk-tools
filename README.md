@@ -12,12 +12,13 @@ Utility services for a Raspberry Pi 5 retro gaming kiosk running NixOS. Each ser
 | **RemotePad** | 3458 | `remote-pad/` | Forward local controllers to PS4 via WebSocket (GoldHEN RemotePad bridge) |
 | **Dolphin Manager** | 3460 | `dolphin/` | Dolphin Emulator launcher — ROM browser, save management, dynamic controller mapping, performance profiles |
 | **Virtual Pad** | 3461 (HTTPS) | `virtual-pad/` | Web-based gamepad — phone touchscreen → WebSocket → uinput evdev device. Supports up to 4 players |
+| **SpaghettiKart** | 3462 | `spaghetti-kart/` | Mario Kart 64 PC port launcher — start/stop game, configure settings, view controllers |
 
 ## Additional
 
 | Name | Directory | Description |
 |------|-----------|-------------|
-| **SpaghettiKart** | `spaghetti-kart/` | Build docs and nix shell for Mario Kart 64 PC port (HarbourMasters) on Pi 5 |
+| ~~SpaghettiKart docs~~ | `spaghetti-kart/` | Also contains BUILD-PI5.md and shell.nix for building from source |
 
 ## Setup
 
