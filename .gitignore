@@ -1,12 +1,22 @@
 node_modules/
 bun.lock
-tags.json
-device-names.json
-kiosk-history.json
-play-history.json
-dolphin-profiles.json
-dolphin-prev-settings.json
-dolphin-hotplug.json
-dolphin/gamecube/roms/
-dolphin/wii/roms/
-uinput-gamepad
+
+# Bluetooth data
+bluetooth/tags.json
+bluetooth/device-names.json
+
+# Dashboard data
+dashboard/kiosk-history.json
+dashboard/kiosk-favourites.json
+
+# Dolphin data
+dolphin/play-history.json
+dolphin/dolphin-profiles.json
+dolphin/dolphin-prev-settings.json
+dolphin/dolphin-hotplug.json
+dolphin/data/gamecube/roms/
+dolphin/data/wii/roms/
+
+# Compiled binaries
+dashboard/uinput-mouse
+virtual-pad/uinput-gamepad

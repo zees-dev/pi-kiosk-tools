@@ -1,14 +1,23 @@
 # pi-kiosk-tools
 
-Utility services for a Raspberry Pi kiosk setup. Each tool is a single self-contained TypeScript file running on [Bun](https://bun.sh).
+Utility services for a Raspberry Pi 5 retro gaming kiosk running NixOS. Each service is a single self-contained TypeScript file running on [Bun](https://bun.sh) with zero external dependencies (except `dbus-next` for Bluetooth).
 
-## Tools
+## Services
 
-| Tool | Port | Description |
-|------|------|-------------|
-| `bluetooth-manager.ts` | 3456 | Web UI for Bluetooth device pairing, with D-Bus BlueZ agent and SNIFF latency optimizer |
-| `wifi-manager.ts` | 3457 | Web UI for WiFi network management via NetworkManager |
-| `remote-pad.ts` | 3458 | Forward local controllers to PS4 via WebSocket (GoldHEN RemotePad) |
+| Service | Port | Directory | Description |
+|---------|------|-----------|-------------|
+| **Kiosk Dashboard** | 80 | `dashboard/` | Main kiosk control panel — service toggles, display & audio settings, remote touchpad, process manager |
+| **Bluetooth Manager** | 3456 | `bluetooth/` | Bluetooth device pairing with D-Bus BlueZ agent, one-click pair, HID auto-rebind, low-latency SNIFF optimization |
+| **WiFi Manager** | 3457 | `wifi/` | WiFi network scanning, connecting, and management via NetworkManager |
+| **RemotePad** | 3458 | `remote-pad/` | Forward local controllers to PS4 via WebSocket (GoldHEN RemotePad bridge) |
+| **Dolphin Manager** | 3460 | `dolphin/` | Dolphin Emulator launcher — ROM browser, save management, dynamic controller mapping, performance profiles |
+| **Virtual Pad** | 3461 (HTTPS) | `virtual-pad/` | Web-based gamepad — phone touchscreen → WebSocket → uinput evdev device. Supports up to 4 players |
+
+## Additional
+
+| Name | Directory | Description |
+|------|-----------|-------------|
+| **SpaghettiKart** | `spaghetti-kart/` | Build docs and nix shell for Mario Kart 64 PC port (HarbourMasters) on Pi 5 |
 
 ## Setup
 
@@ -16,25 +25,11 @@ Utility services for a Raspberry Pi kiosk setup. Each tool is a single self-cont
 bun install
 ```
 
-## Run
-
-```bash
-# Bluetooth Manager (needs D-Bus access)
-bun run bluetooth-manager.ts
-
-# WiFi Manager (needs root for nmcli)
-sudo bun run wifi-manager.ts
-
-# RemotePad Bridge (needs root for /dev/input)
-sudo bun run remote-pad.ts
-```
-
 ## Requirements
 
 - [Bun](https://bun.sh) runtime
-- Linux with BlueZ (bluetooth-manager)
-- NetworkManager (wifi-manager)
-- GoldHEN RemotePad plugin on PS4 (remote-pad)
+- NixOS on Raspberry Pi 5 (Cage Wayland compositor for kiosk mode)
+- BlueZ (bluetooth), NetworkManager (wifi), PipeWire (audio)
 
 ## License
 

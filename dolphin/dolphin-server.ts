@@ -15,7 +15,7 @@ import { join, basename, extname, relative } from "path";
 
 const PORT = 3460;
 const BASE_DIR = import.meta.dir;
-const DOLPHIN_DIR = join(BASE_DIR, "dolphin");
+const DOLPHIN_DIR = join(BASE_DIR, "data");
 const CONFIG_DIR = join(DOLPHIN_DIR, "Config");
 const DOLPHIN_NOGUI = "/run/current-system/sw/bin/dolphin-emu-nogui";
 const DOLPHIN_GUI = "/run/current-system/sw/bin/dolphin-emu";
@@ -1723,7 +1723,7 @@ function renderModalContent(platform) {
 
   let html = '';
   if (roms.length === 0) {
-    html = '<div class="platform-empty">No ROMs found<br><code>dolphin/' + platform + '/roms/</code></div>';
+    html = '<div class="platform-empty">No ROMs found<br><code>data/' + platform + '/roms/</code></div>';
   } else {
     html = '<div class="rom-list">';
     for (const rom of roms) {
