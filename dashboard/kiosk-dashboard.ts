@@ -387,11 +387,7 @@ function getApps(): App[] {
     { id: "spaghettikart", name: "Spaghetti Kart", icon: "🍝", url: `http://${ip}:3462`, description: "Mario Kart 64 PC port", section: "games" },
   ];
 
-  if (mode === "moonlight") {
-    apps.unshift({ id: "moonlight-stop", name: "Stop Moonlight", icon: "🛑", url: "", description: "Return to RetroBox kiosk", action: "stop-moonlight", section: "games" });
-  } else {
-    apps.push({ id: "moonlight", name: "Moonlight", icon: "🌙", url: "", description: "Stream from MacBook Pro", action: "start-moonlight", section: "games" });
-  }
+  apps.push({ id: "moonlight", name: "Moonlight", icon: "🌙", url: "", description: "Stream from MacBook Pro", section: "games" });
 
   apps.push(
     // Apps
@@ -824,6 +820,13 @@ const HTML = `<!DOCTYPE html>
   .svc-toggle input:checked + .slider { background: #2e7d32; }
   .svc-toggle input:checked + .slider::before { transform: translateX(16px); background: #4CAF50; }
   .svc-stop-btn { background: none; border: 1px solid #333; color: #888; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.15s; -webkit-tap-highlight-color: transparent; }
+
+  .proc-row { display: flex; align-items: center; gap: 0; background: #1a1a1a; border: 1px solid #282828; border-radius: 8px; padding: 0; overflow: hidden; }
+  .proc-scroll { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; overflow-x: auto; padding: 8px 12px; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .proc-scroll::-webkit-scrollbar { display: none; }
+  .proc-col { font-size: 12px; font-weight: 500; white-space: nowrap; flex-shrink: 0; }
+  .proc-cmd { min-width: 120px; }
+  .proc-kill { border-radius: 0 6px 6px 0; border-left: 1px solid #282828; height: 100%; min-height: 36px; }
   .svc-stop-btn:hover { border-color: #f44336; color: #f44336; background: rgba(244,67,54,0.1); }
   .svc-start-btn { background: none; border: 1px solid #333; color: #888; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.15s; -webkit-tap-highlight-color: transparent; }
   .svc-start-btn:hover { border-color: #4CAF50; color: #4CAF50; background: rgba(76,175,80,0.1); }
@@ -1105,43 +1108,16 @@ function renderSysCards(sys) {
 let lastPortsJson = '';
 let lastProcsJson = '';
 
-function fuzzyMatch(text, query) {
-  text = text.toLowerCase();
-  query = query.toLowerCase();
-  if (!query) return true;
-  let qi = 0;
-  for (let i = 0; i < text.length && qi < query.length; i++) {
-    if (text[i] === query[qi]) qi++;
-  }
-  return qi === query.length;
-}
 
-function renderPorts(ports) {
-  const json = JSON.stringify(ports);
-  if (json === lastPortsJson) return;
-  lastPortsJson = json;
 
-  const el = $('portsSection');
-  if (!el) return;
-  if (!ports || !ports.length) { el.innerHTML = ''; return; }
-
-  // Inject Dolphin emulator process if running
-  if (window._dolphinStatus && window._dolphinStatus.state === 'running') {
-    const ds = window._dolphinStatus;
-    ports = [...ports, { port: 0, proto: 'emu', process: 'dolphin-emu' + (ds.rom ? ': ' + ds.rom : ''), pid: ds.pid || 0 }];
-  }
-
-  window._portsData = ports;
-  const collapsed = el.dataset.collapsed === 'true';
-  const filter = el.dataset.filter || '';
+function buildPortRows(ports, filter, collapsed) {
   const preview = 5;
-
   const selfProcs = ['kiosk-dashboa', 'openclaw'];
-  const filtered = ports.filter(p => !filter || fuzzyMatch(p.process + ':' + p.port, filter));
+  const filtered = ports.filter(p => !filter || fuzzyMatch(filter, p.process + ':' + p.port + ' ' + p.pid));
   const visible = collapsed ? filtered.slice(0, preview) : filtered;
   const hasMore = collapsed && filtered.length > preview;
 
-  const portRows = visible.map(p => {
+  const rows = visible.map(p => {
     const isSelf = selfProcs.some(s => p.process.startsWith(s));
     const isEmu = p.proto === 'emu';
     const portLabel = isEmu ? '🐬' : ':' + p.port;
@@ -1158,20 +1134,127 @@ function renderPorts(ports) {
 
   const expandBtn = hasMore ? '<div style="text-align:center;padding:4px 0"><button class="expand-toggle" data-target="ports" style="background:none;border:1px solid #333;color:#888;border-radius:6px;padding:2px 12px;font-size:11px;cursor:pointer">+' + (filtered.length - preview) + ' more</button></div>' : '';
   const collapseBtn = !collapsed && filtered.length > preview ? '<div style="text-align:center;padding:4px 0"><button class="collapse-toggle" data-target="ports" style="background:none;border:1px solid #333;color:#888;border-radius:6px;padding:2px 12px;font-size:11px;cursor:pointer">Show less</button></div>' : '';
+
+  return rows + expandBtn + collapseBtn;
+}
+
+function updatePortBody(el) {
+  const ports = window._portsData;
+  if (!ports) return;
+  const filter = el.dataset.filter || '';
+  const collapsed = el.dataset.collapsed === 'true';
+  const body = el.querySelector('.port-body');
+  if (body) body.innerHTML = buildPortRows(ports, filter, collapsed);
+  attachPortsBodyHandlers(el);
+}
+
+function renderPorts(ports, forceRender) {
+  const json = JSON.stringify(ports);
+  if (!forceRender && json === lastPortsJson) return;
+  lastPortsJson = json;
+
+  const el = $('portsSection');
+  if (!el) return;
+  if (!ports || !ports.length) { el.innerHTML = ''; return; }
+
+  // Inject Dolphin emulator process if running
+  if (window._dolphinStatus && window._dolphinStatus.state === 'running') {
+    const ds = window._dolphinStatus;
+    ports = [...ports, { port: 0, proto: 'emu', process: 'dolphin-emu' + (ds.rom ? ': ' + ds.rom : ''), pid: ds.pid || 0 }];
+  }
+
+  window._portsData = ports;
+  const filter = el.dataset.filter || '';
+  const collapsed = el.dataset.collapsed === 'true';
+  const preview = 5;
+
+  // If skeleton already exists, just update the body (preserves input focus)
+  if (el.querySelector('.port-body')) {
+    const countEl = el.querySelector('.port-count');
+    if (countEl) countEl.textContent = '(' + ports.length + ')';
+    updatePortBody(el);
+    return;
+  }
+
   const filterInput = '<input type="text" class="filter-input" data-target="ports" placeholder="Filter ports..." value="' + escHtml(filter) + '" style="width:100%;padding:4px 8px;margin-bottom:6px;background:#1a1a1a;border:1px solid #333;border-radius:4px;color:#ccc;font-size:12px;outline:none;box-sizing:border-box">';
 
   el.innerHTML =
-    '<div class="sys-card" style="margin-top:0"><div class="sys-label">Ports <span style="color:#555;font-size:11px">(' + ports.length + ')</span></div><div class="sys-value">' +
+    '<div class="sys-card" style="margin-top:0"><div class="sys-label">Ports <span class="port-count" style="color:#555;font-size:11px">(' + ports.length + ')</span></div><div class="sys-value">' +
     (ports.length > preview ? filterInput : '') +
-    '<div class="svc-list-full">' + portRows + '</div>' + expandBtn + collapseBtn + '</div></div>';
+    '<div class="port-body">' + buildPortRows(ports, filter, collapsed) + '</div>' +
+    '</div></div>';
 
   if (el.dataset.collapsed === undefined) el.dataset.collapsed = 'true';
-  attachPortsHandlers(el);
+
+  // Filter input — updates body only, keeps input alive
+  const fi = el.querySelector('.filter-input');
+  if (fi) fi.oninput = (e) => { el.dataset.filter = e.target.value; el.dataset.collapsed = 'false'; updatePortBody(el); };
+
+  attachPortsBodyHandlers(el);
 }
 
-function renderProcesses(procs) {
+// Process sort state
+let procSortCol = 'cpu';
+let procSortAsc = false; // default: highest CPU first
+
+function sortProcs(procs, col, asc) {
+  const sorted = [...procs];
+  sorted.sort((a, b) => {
+    let va, vb;
+    if (col === 'cpu') { va = a.cpu; vb = b.cpu; }
+    else if (col === 'mem') { va = a.rss; vb = b.rss; }
+    else if (col === 'user') { va = a.user.toLowerCase(); vb = b.user.toLowerCase(); }
+    else if (col === 'cmd') { va = a.cmd.toLowerCase(); vb = b.cmd.toLowerCase(); }
+    else if (col === 'pid') { va = a.pid; vb = b.pid; }
+    else return 0;
+    if (va < vb) return asc ? -1 : 1;
+    if (va > vb) return asc ? 1 : -1;
+    return 0;
+  });
+  return sorted;
+}
+
+function buildProcRows(procs, filter, collapsed) {
+  const preview = 8;
+  let filtered = procs.filter(p => !filter || fuzzyMatch(filter, p.cmd + ' ' + p.user + ' ' + p.pid));
+  filtered = sortProcs(filtered, procSortCol, procSortAsc);
+  const visible = collapsed ? filtered.slice(0, preview) : filtered;
+  const hasMore = collapsed && filtered.length > preview;
+
+  const rows = visible.map(p => {
+    const cpuColor = p.cpu > 50 ? '#e74c3c' : p.cpu > 10 ? '#f39c12' : '#4CAF50';
+    return '<div class="proc-row">' +
+      '<div class="proc-scroll">' +
+        '<span class="proc-col" style="min-width:50px;color:' + cpuColor + ';font-family:monospace">' + p.cpu.toFixed(1) + '%</span>' +
+        '<span class="proc-col" style="min-width:45px;color:#666;font-family:monospace">' + (p.rss >= 1024 ? (p.rss / 1024).toFixed(0) + 'M' : p.rss + 'K') + '</span>' +
+        '<span class="proc-col" style="min-width:50px;color:#555">' + escHtml(p.user) + '</span>' +
+        '<span class="proc-col proc-cmd">' + escHtml(p.cmd) + '</span>' +
+        '<span class="proc-col" style="min-width:40px;color:#555;text-align:right">' + p.pid + '</span>' +
+      '</div>' +
+      '<button class="svc-stop-btn port-kill proc-kill" data-pid="' + p.pid + '" title="Kill process">✕</button>' +
+    '</div>';
+  }).join('');
+
+  const expandBtn = hasMore ? '<div style="text-align:center;padding:4px 0"><button class="expand-toggle" data-target="procs" style="background:none;border:1px solid #333;color:#888;border-radius:6px;padding:2px 12px;font-size:11px;cursor:pointer">+' + (filtered.length - preview) + ' more</button></div>' : '';
+  const collapseBtn = !collapsed && filtered.length > preview ? '<div style="text-align:center;padding:4px 0"><button class="collapse-toggle" data-target="procs" style="background:none;border:1px solid #333;color:#888;border-radius:6px;padding:2px 12px;font-size:11px;cursor:pointer">Show less</button></div>' : '';
+
+  return rows + expandBtn + collapseBtn;
+}
+
+function updateProcBody(el) {
+  const procs = window._procsData;
+  if (!procs) return;
+  const filter = el.dataset.filter || '';
+  const collapsed = el.dataset.collapsed === 'true';
+  const body = el.querySelector('.proc-body');
+  if (body) body.innerHTML = buildProcRows(procs, filter, collapsed);
+  // Re-attach expand/collapse/kill handlers on body only
+  attachProcsBodyHandlers(el);
+}
+
+function renderProcesses(procs, forceRender) {
   const json = JSON.stringify(procs);
-  if (json === lastProcsJson) return;
+  if (!forceRender && json === lastProcsJson) return;
   lastProcsJson = json;
 
   const el = $('procsSection');
@@ -1179,55 +1262,69 @@ function renderProcesses(procs) {
   if (!procs || !procs.length) { el.innerHTML = ''; return; }
 
   window._procsData = procs;
-  const collapsed = el.dataset.collapsed === 'true';
   const filter = el.dataset.filter || '';
-  const preview = 8;
+  const collapsed = el.dataset.collapsed === 'true';
 
-  const filtered = procs.filter(p => !filter || fuzzyMatch(p.cmd + ' ' + p.user + ' ' + p.pid, filter));
-  const visible = collapsed ? filtered.slice(0, preview) : filtered;
-  const hasMore = collapsed && filtered.length > preview;
+  // If skeleton already exists, just update the body (preserves input focus)
+  if (el.querySelector('.proc-body')) {
+    const countEl = el.querySelector('.proc-count');
+    if (countEl) countEl.textContent = '(' + procs.length + ')';
+    updateProcBody(el);
+    return;
+  }
 
-  const procRows = visible.map(p => {
-    const cpuColor = p.cpu > 50 ? '#e74c3c' : p.cpu > 10 ? '#f39c12' : '#4CAF50';
-    return '<div class="svc-row">' +
-      '<span class="svc-name" style="flex:0 0 50px;color:' + cpuColor + ';font-family:monospace;font-size:11px">' + p.cpu.toFixed(1) + '%</span>' +
-      '<span class="svc-name" style="flex:0 0 45px;color:#666;font-family:monospace;font-size:11px">' + (p.rss >= 1024 ? (p.rss / 1024).toFixed(0) + 'M' : p.rss + 'K') + '</span>' +
-      '<span class="svc-name" style="flex:0 0 50px;color:#555;font-size:11px">' + escHtml(p.user) + '</span>' +
-      '<span class="svc-name" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(p.cmd) + '</span>' +
-      '<span class="svc-name" style="flex:0 0 40px;color:#555;font-size:11px;text-align:right">' + p.pid + '</span>' +
-      '<button class="svc-stop-btn port-kill" data-pid="' + p.pid + '" title="Kill process" style="flex:0 0 24px">✕</button>' +
-    '</div>';
-  }).join('');
-
-  const expandBtn = hasMore ? '<div style="text-align:center;padding:4px 0"><button class="expand-toggle" data-target="procs" style="background:none;border:1px solid #333;color:#888;border-radius:6px;padding:2px 12px;font-size:11px;cursor:pointer">+' + (filtered.length - preview) + ' more</button></div>' : '';
-  const collapseBtn = !collapsed && filtered.length > preview ? '<div style="text-align:center;padding:4px 0"><button class="collapse-toggle" data-target="procs" style="background:none;border:1px solid #333;color:#888;border-radius:6px;padding:2px 12px;font-size:11px;cursor:pointer">Show less</button></div>' : '';
-  const header = '<div class="svc-row" style="border-bottom:1px solid #282828;padding-bottom:2px;margin-bottom:4px">' +
-    '<span style="flex:0 0 50px;color:#555;font-size:10px;text-transform:uppercase">CPU</span>' +
-    '<span style="flex:0 0 45px;color:#555;font-size:10px;text-transform:uppercase">MEM</span>' +
-    '<span style="flex:0 0 50px;color:#555;font-size:10px;text-transform:uppercase">USER</span>' +
-    '<span style="flex:1;color:#555;font-size:10px;text-transform:uppercase">CMD</span>' +
-    '<span style="flex:0 0 40px;color:#555;font-size:10px;text-transform:uppercase;text-align:right">PID</span>' +
-    '<span style="flex:0 0 24px"></span></div>';
+  function sortHead(label, col, width, extra) {
+    const active = procSortCol === col;
+    const arrow = active ? (procSortAsc ? ' ▲' : ' ▼') : '';
+    const color = active ? '#4a9eff' : '#555';
+    return '<span class="proc-col proc-sort" data-col="' + col + '" style="min-width:' + width + ';color:' + color + ';font-size:10px;text-transform:uppercase;cursor:pointer;user-select:none;' + (extra||'') + '">' + label + arrow + '</span>';
+  }
+  const header = '<div class="proc-row proc-header" style="border-bottom:1px solid #282828;padding-bottom:2px;margin-bottom:4px">' +
+    '<div class="proc-scroll">' +
+      sortHead('CPU', 'cpu', '50px') +
+      sortHead('MEM', 'mem', '45px') +
+      sortHead('USER', 'user', '50px') +
+      sortHead('CMD', 'cmd', '120px') +
+      sortHead('PID', 'pid', '40px', 'text-align:right') +
+    '</div>' +
+    '<span style="width:24px;flex:0 0 24px"></span></div>';
   const filterInput = '<input type="text" class="filter-input" data-target="procs" placeholder="Filter processes..." value="' + escHtml(filter) + '" style="width:100%;padding:4px 8px;margin-bottom:6px;background:#1a1a1a;border:1px solid #333;border-radius:4px;color:#ccc;font-size:12px;outline:none;box-sizing:border-box">';
 
   el.innerHTML =
-    '<div class="sys-card" style="margin-top:0"><div class="sys-label">Processes <span style="color:#555;font-size:11px">(' + procs.length + ')</span></div><div class="sys-value">' +
+    '<div class="sys-card" style="margin-top:0"><div class="sys-label">Processes <span class="proc-count" style="color:#555;font-size:11px">(' + procs.length + ')</span></div><div class="sys-value">' +
     filterInput + header +
-    '<div class="svc-list-full">' + procRows + '</div>' + expandBtn + collapseBtn + '</div></div>';
+    '<div class="proc-body">' + buildProcRows(procs, filter, collapsed) + '</div>' +
+    '</div></div>';
 
   if (el.dataset.collapsed === undefined) el.dataset.collapsed = 'true';
-  attachProcsHandlers(el);
+
+  // Filter input — updates body only, keeps input alive
+  const fi = el.querySelector('.filter-input');
+  if (fi) fi.oninput = (e) => { el.dataset.filter = e.target.value; el.dataset.collapsed = 'false'; updateProcBody(el); };
+
+  // Sort column headers
+  el.querySelectorAll('.proc-sort').forEach(span => {
+    span.onclick = () => {
+      const col = span.dataset.col;
+      if (procSortCol === col) { procSortAsc = !procSortAsc; }
+      else { procSortCol = col; procSortAsc = (col === 'cmd' || col === 'user'); }
+      // Force full rebuild (header arrows change)
+      el.innerHTML = '';
+      lastProcsJson = '';
+      renderProcesses(window._procsData, true);
+    };
+  });
+
+  attachProcsBodyHandlers(el);
 }
 
-function attachPortsHandlers(el) {
+function attachPortsBodyHandlers(el) {
   el.querySelectorAll('.expand-toggle').forEach(btn => {
-    btn.onclick = () => { el.dataset.collapsed = 'false'; renderPorts(window._portsData); };
+    btn.onclick = () => { el.dataset.collapsed = 'false'; updatePortBody(el); };
   });
   el.querySelectorAll('.collapse-toggle').forEach(btn => {
-    btn.onclick = () => { el.dataset.collapsed = 'true'; el.dataset.filter = ''; renderPorts(window._portsData); };
+    btn.onclick = () => { el.dataset.collapsed = 'true'; updatePortBody(el); };
   });
-  const fi = el.querySelector('.filter-input');
-  if (fi) fi.oninput = (e) => { el.dataset.filter = e.target.value; el.dataset.collapsed = 'false'; renderPorts(window._portsData); };
 
   // Kill/stop handlers
   el.querySelectorAll('.port-kill').forEach(btn => {
@@ -1257,15 +1354,13 @@ function attachPortsHandlers(el) {
   });
 }
 
-function attachProcsHandlers(el) {
+function attachProcsBodyHandlers(el) {
   el.querySelectorAll('.expand-toggle').forEach(btn => {
-    btn.onclick = () => { el.dataset.collapsed = 'false'; renderProcesses(window._procsData); };
+    btn.onclick = () => { el.dataset.collapsed = 'false'; updateProcBody(el); };
   });
   el.querySelectorAll('.collapse-toggle').forEach(btn => {
-    btn.onclick = () => { el.dataset.collapsed = 'true'; el.dataset.filter = ''; renderProcesses(window._procsData); };
+    btn.onclick = () => { el.dataset.collapsed = 'true'; updateProcBody(el); };
   });
-  const fi = el.querySelector('.filter-input');
-  if (fi) fi.oninput = (e) => { el.dataset.filter = e.target.value; el.dataset.collapsed = 'false'; renderProcesses(window._procsData); };
 
   el.querySelectorAll('.port-kill').forEach(btn => {
     btn.onclick = async (e) => {
@@ -1418,26 +1513,49 @@ function renderApps(kioskUrl) {
   for (const app of apps) {
     const card = document.createElement('div');
     const isActive = kioskUrl && app.url && kioskUrl.startsWith(app.url);
-    const isMoonlightStop = app.action === 'stop-moonlight';
+    const isMoonlight = app.id === 'moonlight';
+    const isMoonlightRunning = isMoonlight && window._kioskMode === 'moonlight';
     const appServiceMap = { retrobox: 'retrobox', dolphin: 'dolphin-manager', wifi: 'wifi-manager', bluetooth: 'bluetooth-manager', remotepad: 'remote-pad', virtualpad: 'virtual-pad', spaghettikart: 'spaghetti-kart', vnc: 'vnc' };
     const svcName = appServiceMap[app.id];
     const svcInfo = svcName && window._serviceMap ? window._serviceMap[svcName] : null;
     const isDisabled = svcInfo ? !svcInfo.active : false;
-    card.className = 'app-card' + (isActive ? ' active' : '') + (isMoonlightStop ? ' active' : '') + (isDisabled ? ' disabled' : '');
-    const diagHtml = app.action ? '' : formatDiag(app, diagCache[app.id]);
+    card.className = 'app-card' + (isActive ? ' active' : '') + (isMoonlightRunning ? ' active' : '') + (isDisabled ? ' disabled' : '');
+    const diagHtml = isMoonlight ? '' : formatDiag(app, diagCache[app.id]);
     let ctrlHtml = '';
     if (!isDisabled && app.id === 'retrobox') ctrlHtml = '<a class="open-link" href="https://' + location.hostname + ':3334/controller.html?screen=127-0-0-1" target="_blank" title="Controller" onclick="event.stopPropagation()">⊞</a>';
     if (!isDisabled && app.id === 'virtualpad') ctrlHtml = '<a class="open-link" href="https://' + location.hostname + ':3461/" target="_blank" title="Open controller" onclick="event.stopPropagation()">🎮</a>';
-    const linkHtml = (!isDisabled && app.url) ? '<a class="open-link" href="' + app.url + '" target="_blank" title="Open in browser">↗</a>' : '';
+    let linkHtml = '';
+    if (isMoonlight) {
+      if (isMoonlightRunning) {
+        linkHtml = '<a class="open-link moonlight-stop" href="#" title="Stop Moonlight" style="color:#f44">⏹</a>';
+      } else {
+        linkHtml = '<a class="open-link moonlight-play" href="#" title="Start Moonlight" style="color:#4CAF50">▶</a>';
+      }
+    } else if (!isDisabled && app.url && !app.external) {
+      linkHtml = '<a class="open-link kiosk-nav" href="#" title="Open on kiosk display">↗</a>';
+    }
     card.innerHTML = '<div class="icon">' + app.icon + '</div><div class="app-info"><div class="name">' + app.name + '</div><div class="desc">' + app.description + '</div></div>' + diagHtml + ctrlHtml + linkHtml;
-    if (isDisabled) {
+    // Moonlight play/stop buttons
+    const playBtn = card.querySelector('.moonlight-play');
+    if (playBtn) {
+      playBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); handleMoonlightAction('start-moonlight'); });
+    }
+    const stopBtn = card.querySelector('.moonlight-stop');
+    if (stopBtn) {
+      stopBtn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); handleMoonlightAction('stop-moonlight'); });
+    }
+    // ↗ arrow → send to kiosk HDMI display
+    const navLink = card.querySelector('.kiosk-nav');
+    if (navLink) {
+      navLink.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); navigate(app.url, false); });
+    }
+    // Card click → open on this device (no click for moonlight)
+    if (isDisabled || isMoonlight) {
       // no click handler
-    } else if (app.action) {
-      card.onclick = () => handleMoonlightAction(app.action);
     } else if (app.external) {
       card.onclick = () => { window.open(app.url, '_blank'); };
     } else {
-      card.onclick = (e) => { if (!e.target.closest('.open-link')) navigate(app.url, false); };
+      card.onclick = (e) => { if (!e.target.closest('.open-link')) window.open(app.url, '_blank'); };
     }
     const target = (app.section === 'games' && gamesGrid) ? gamesGrid : appGrid;
     target.appendChild(card);
@@ -1571,6 +1689,11 @@ async function loadApps() {
   try {
     const resp = await fetch('/api/apps');
     apps = await resp.json();
+  } catch {}
+  try {
+    const resp = await fetch('/api/kiosk-mode');
+    const data = await resp.json();
+    window._kioskMode = data.mode;
   } catch {}
 }
 

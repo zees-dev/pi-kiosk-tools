@@ -12,14 +12,15 @@
  */
 
 import { spawn, type Subprocess } from "bun";
-import { existsSync, readFileSync, openSync, closeSync, createReadStream } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, openSync, closeSync, createReadStream } from "node:fs";
 import { join, dirname } from "node:path";
 import { networkInterfaces } from "node:os";
 
 const PORT = 3461;
 const BASE_DIR = dirname(import.meta.path);
 const UINPUT_BIN = join(BASE_DIR, "uinput-gamepad");
-const MAX_PLAYERS = 4;
+const CONFIG_FILE = join(BASE_DIR, "virtual-pad-config.json");
+const MAX_PLAYERS = 32; // OS practical limit, not enforced artificially
 
 // ── Event constants ─────────────────────────────────────────────────────
 const EV_SYN = 0, EV_KEY = 1, EV_ABS = 3;
@@ -51,6 +52,71 @@ const BUTTON_MAP: [number, number][] = [
   [16, BTN_MODE],
 ];
 
+// ── FFI for ioctl (must be before EVIOCGRAB usage) ─────────────────────
+let libc: any = null;
+let _ptr: any = null;
+try {
+  const ffi = await import("bun:ffi");
+  _ptr = ffi.ptr;
+  libc = ffi.dlopen("libc.so.6", {
+    ioctl: { args: [ffi.FFIType.i32, ffi.FFIType.u32, ffi.FFIType.ptr], returns: ffi.FFIType.i32 },
+  });
+} catch (e) {
+  console.error("  ⚠ Could not load libc for ioctl — axis ranges and EVIOCGRAB will use defaults");
+}
+
+// ── Global Controller Hub config ────────────────────────────────────────
+interface VpadConfig { globalHub: boolean }
+function loadConfig(): VpadConfig {
+  try { if (existsSync(CONFIG_FILE)) return JSON.parse(readFileSync(CONFIG_FILE, "utf-8")); } catch {}
+  return { globalHub: false };
+}
+function saveConfig(cfg: VpadConfig) {
+  try { writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2) + "\n"); } catch {}
+}
+let globalHubEnabled = loadConfig().globalHub;
+
+// EVIOCGRAB ioctl: _IOW('E', 0x90, int) — exclusively grab an evdev device
+// _IOW(type, nr, size) on aarch64 = ((1 << 30) | (size << 16) | (type << 8) | nr)
+const EVIOCGRAB = ((1 << 30) | (4 << 16) | (0x45 << 8) | 0x90) >>> 0;
+
+// Map of grabbed evdev FDs for release on disable
+const grabbedFds = new Map<string, number>(); // eventPath → fd
+
+function grabDevice(eventPath: string): boolean {
+  if (!libc || !_ptr) return false;
+  if (grabbedFds.has(eventPath)) return true;
+  try {
+    const fd = openSync(eventPath, "r");
+    const buf = new Int32Array([1]); // 1 = grab
+    const ret = libc.symbols.ioctl(fd, EVIOCGRAB, _ptr(buf));
+    if (ret === 0) {
+      grabbedFds.set(eventPath, fd);
+      console.log(`  🔒 Grabbed ${eventPath}`);
+      return true;
+    } else {
+      closeSync(fd);
+      console.error(`  ✗ EVIOCGRAB failed for ${eventPath}`);
+      return false;
+    }
+  } catch (e: any) {
+    console.error(`  ✗ Failed to grab ${eventPath}:`, e.message);
+    return false;
+  }
+}
+
+function ungrabDevice(eventPath: string) {
+  const fd = grabbedFds.get(eventPath);
+  if (fd === undefined) return;
+  try {
+    const buf = new Int32Array([0]); // 0 = ungrab
+    if (libc && _ptr) libc.symbols.ioctl(fd, EVIOCGRAB, _ptr(buf));
+    closeSync(fd);
+  } catch {}
+  grabbedFds.delete(eventPath);
+  console.log(`  🔓 Ungrabbed ${eventPath}`);
+}
+
 // ── Player Slots (web controllers) ─────────────────────────────────────
 interface PlayerSlot {
   ws: any | null;
@@ -63,11 +129,16 @@ interface PlayerSlot {
 }
 
 const slots: PlayerSlot[] = [];
-for (let i = 0; i < MAX_PLAYERS; i++) {
-  const axes = new Uint8Array(6);
-  axes[0] = axes[1] = axes[2] = axes[3] = 128;
-  slots.push({ ws: null, proc: null, prevButtons: 0, prevAxes: axes, lastState: null, label: "", vendorId: 0 });
+
+function ensureSlot(idx: number) {
+  while (slots.length <= idx) {
+    const axes = new Uint8Array(6);
+    axes[0] = axes[1] = axes[2] = axes[3] = 128;
+    slots.push({ ws: null, proc: null, prevButtons: 0, prevAxes: axes, lastState: null, label: "", vendorId: 0 });
+  }
 }
+// Pre-allocate a few slots
+for (let i = 0; i < 4; i++) ensureSlot(i);
 
 const viewClients = new Set<any>();
 
@@ -151,10 +222,17 @@ function processInput(idx: number, data: ArrayBuffer) {
 }
 
 function findFreeSlot(): number {
-  for (let i = 0; i < MAX_PLAYERS; i++) {
-    // When hw forwarding is on, skip slots claimed by hardware controllers
-    if (hwForwardingEnabled && Array.from(hwSlotMap.values()).includes(i)) continue;
+  const hwSlots = new Set(hwSlotMap.values());
+  // Check existing slots first
+  for (let i = 0; i < slots.length; i++) {
+    if ((hwForwardingEnabled || globalHubEnabled) && hwSlots.has(i)) continue;
     if (!slots[i].ws) return i;
+  }
+  // Expand if under limit
+  if (slots.length < MAX_PLAYERS) {
+    const idx = slots.length;
+    ensureSlot(idx);
+    return idx;
   }
   return -1;
 }
@@ -187,9 +265,15 @@ let hwForwardingEnabled = false;
 const hwSlotMap = new Map<string, number>(); // eventPath → slot index
 
 function findFreeHwSlot(): number {
-  for (let i = 0; i < MAX_PLAYERS; i++) {
-    // Slot must not have a web client AND not be assigned to another hw controller
-    if (!slots[i].ws && !Array.from(hwSlotMap.values()).includes(i)) return i;
+  const hwSlots = new Set(hwSlotMap.values());
+  for (let i = 0; i < slots.length; i++) {
+    if (!slots[i].ws && !hwSlots.has(i)) return i;
+  }
+  // Expand
+  if (slots.length < MAX_PLAYERS) {
+    const idx = slots.length;
+    ensureSlot(idx);
+    return idx;
   }
   return -1;
 }
@@ -197,18 +281,25 @@ function findFreeHwSlot(): number {
 function assignHwToSlot(eventPath: string): number {
   if (hwSlotMap.has(eventPath)) return hwSlotMap.get(eventPath)!;
 
+  const hwSlots = new Set(hwSlotMap.values());
+
   // Hardware gets priority — find lowest slot, bumping web clients if needed
   let idx = -1;
-  for (let i = 0; i < MAX_PLAYERS; i++) {
-    if (Array.from(hwSlotMap.values()).includes(i)) continue; // already hw-claimed
+  for (let i = 0; i < Math.max(slots.length, 1); i++) {
+    ensureSlot(i);
+    if (hwSlots.has(i)) continue; // already hw-claimed
     if (slots[i].ws) {
-      // Web client on this slot — try to bump it to a higher free slot
+      // Web client on this slot — bump it to a higher free slot (or expand)
       let bumpTo = -1;
-      for (let j = i + 1; j < MAX_PLAYERS; j++) {
-        if (!slots[j].ws && !Array.from(hwSlotMap.values()).includes(j)) { bumpTo = j; break; }
+      for (let j = i + 1; j < slots.length; j++) {
+        if (!slots[j].ws && !hwSlots.has(j)) { bumpTo = j; break; }
+      }
+      // If no free slot found, expand
+      if (bumpTo < 0 && slots.length < MAX_PLAYERS) {
+        bumpTo = slots.length;
+        ensureSlot(bumpTo);
       }
       if (bumpTo >= 0) {
-        // Move web client up
         const oldWs = slots[i].ws;
         const oldLabel = slots[i].label;
         const oldVendor = slots[i].vendorId;
@@ -233,6 +324,11 @@ function assignHwToSlot(eventPath: string): number {
     // Empty slot
     idx = i;
     break;
+  }
+  // If still no slot, try expanding
+  if (idx < 0 && slots.length < MAX_PLAYERS) {
+    idx = slots.length;
+    ensureSlot(idx);
   }
 
   if (idx < 0) return -1;
@@ -275,9 +371,9 @@ function enableHwForwarding() {
   if (hwForwardingEnabled) return;
   hwForwardingEnabled = true;
   console.log("🔗 HW forwarding enabled — hardware controllers → uinput");
-  // Assign all currently connected hw controllers to slots
   for (const [path] of hwControllers) {
     assignHwToSlot(path);
+    if (globalHubEnabled) grabDevice(path);
   }
 }
 
@@ -285,10 +381,33 @@ function disableHwForwarding() {
   if (!hwForwardingEnabled) return;
   hwForwardingEnabled = false;
   console.log("🔓 HW forwarding disabled — hardware controllers direct");
-  // Release all hw→uinput assignments
   for (const path of Array.from(hwSlotMap.keys())) {
     releaseHwSlot(path);
   }
+  // Ungrab all devices
+  for (const path of Array.from(grabbedFds.keys())) {
+    ungrabDevice(path);
+  }
+}
+
+function enableGlobalHub() {
+  if (globalHubEnabled) return;
+  globalHubEnabled = true;
+  saveConfig({ globalHub: true });
+  console.log("🌐 Global Controller Hub enabled — all hardware exclusively routed through uinput");
+  enableHwForwarding();
+  // Grab all currently monitored hw controllers
+  for (const [path] of hwControllers) {
+    grabDevice(path);
+  }
+}
+
+function disableGlobalHub() {
+  if (!globalHubEnabled) return;
+  globalHubEnabled = false;
+  saveConfig({ globalHub: false });
+  console.log("🌐 Global Controller Hub disabled — hardware passes through directly");
+  disableHwForwarding();
 }
 
 function readAbsInfo(eventNum: number, absCode: number): { min: number; max: number } | null {
@@ -310,18 +429,6 @@ function readAbsInfo(eventNum: number, absCode: number): { min: number; max: num
 // _IOR(type, nr, size) on aarch64 = ((2 << 30) | (size << 16) | (type << 8) | nr)
 function eviocgabs(abs: number): number {
   return ((2 << 30) | (24 << 16) | (0x45 << 8) | (0x40 + abs)) >>> 0;
-}
-
-let libc: any = null;
-let _ptr: any = null;
-try {
-  const ffi = await import("bun:ffi");
-  _ptr = ffi.ptr;
-  libc = ffi.dlopen("libc.so.6", {
-    ioctl: { args: [ffi.FFIType.i32, ffi.FFIType.u32, ffi.FFIType.ptr], returns: ffi.FFIType.i32 },
-  });
-} catch (e) {
-  console.error("  ⚠ Could not load libc for ioctl — axis ranges will use defaults");
 }
 
 function readAbsInfoIoctl(fd: number, absCode: number): { min: number; max: number } | null {
@@ -475,7 +582,7 @@ function startHwMonitor(hw: HwController) {
         hwStateToProtocol(hw);
         broadcastHwState(hw.eventPath);
         // Forward normalized state through uinput (same pipeline as web controllers)
-        if (hwForwardingEnabled) {
+        if (hwForwardingEnabled || globalHubEnabled) {
           const idx = hwSlotMap.get(hw.eventPath);
           if (idx !== undefined) {
             processInput(idx, hw.state.buffer);
@@ -503,7 +610,8 @@ function stopHwMonitor(eventPath: string) {
   const hw = hwControllers.get(eventPath);
   if (!hw) return;
   if (hw.stream) { try { hw.stream.destroy(); } catch {} hw.stream = null; }
-  if (hwForwardingEnabled) releaseHwSlot(eventPath);
+  if (hwForwardingEnabled || globalHubEnabled) releaseHwSlot(eventPath);
+  ungrabDevice(eventPath);
   hwControllers.delete(eventPath);
   console.log(`  ✗ Stopped monitoring ${hw.name}`);
   broadcastFull();
@@ -567,8 +675,9 @@ function scanAndUpdateHw() {
         rawButtons: new Set(), rawAxes: new Map(),
       };
       hwControllers.set(path, hw);
+      if (globalHubEnabled) grabDevice(path);
       startHwMonitor(hw);
-      if (hwForwardingEnabled) assignHwToSlot(path);
+      if (hwForwardingEnabled || globalHubEnabled) assignHwToSlot(path);
       broadcastFull();
     }
   }
@@ -584,6 +693,16 @@ function scanAndUpdateHw() {
 // Scan every 2s for connects/disconnects
 setInterval(scanAndUpdateHw, 2000);
 scanAndUpdateHw();
+
+// Auto-enable global hub if configured
+if (globalHubEnabled) {
+  console.log("🌐 Global Controller Hub: auto-enabling from config");
+  hwForwardingEnabled = true; // enable forwarding without re-saving config
+  for (const [path] of hwControllers) {
+    grabDevice(path);
+    assignHwToSlot(path);
+  }
+}
 
 // ── View broadcast ──────────────────────────────────────────────────────
 function broadcastPlayerState(idx: number) {
@@ -1084,11 +1203,34 @@ const VIEW_HTML = `<!DOCTYPE html>
   .status-dot { width: 6px; height: 6px; border-radius: 50%; }
   .status-dot.on { background: #4CAF50; }
   .status-dot.off { background: #f44; }
+
+  .hub-toggle { display: flex; align-items: center; gap: 12px; background: #1a1a1a; border: 1px solid #282828; border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; }
+  .hub-toggle .hub-info { flex: 1; }
+  .hub-toggle .hub-title { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+  .hub-toggle .hub-desc { font-size: 11px; color: #666; line-height: 1.3; }
+  .hub-toggle .hub-badge { font-size: 10px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+  .hub-badge.on { background: #4a9eff22; color: #4a9eff; border: 1px solid #4a9eff44; }
+  .hub-badge.off { background: #33333388; color: #888; border: 1px solid #33333388; }
+  .toggle { position: relative; width: 42px; height: 24px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .toggle .knob { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: #333; border-radius: 12px; cursor: pointer; transition: .2s; }
+  .toggle .knob:before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; bottom: 3px; background: #888; border-radius: 50%; transition: .2s; }
+  .toggle input:checked+.knob { background: #4a9eff; }
+  .toggle input:checked+.knob:before { transform: translateX(18px); background: #fff; }
 </style>
 </head>
 <body>
 <div class="container">
   <h1>🎮 Controllers</h1>
+
+  <div class="hub-toggle">
+    <div class="hub-info">
+      <div class="hub-title">🌐 Global Controller Hub</div>
+      <div class="hub-desc">Exclusively capture hardware controllers and route through virtual gamepad slots. Hardware gets priority.</div>
+    </div>
+    <span class="hub-badge" id="hubBadge">OFF</span>
+    <label class="toggle"><input type="checkbox" id="hubToggle" onchange="toggleGlobalHub(this.checked)"><span class="knob"></span></label>
+  </div>
 
   <div class="section-title">Hardware</div>
   <div class="grid" id="hwGrid"></div>
@@ -1106,6 +1248,25 @@ const VIEW_HTML = `<!DOCTYPE html>
 <script>
 const $ = id => document.getElementById(id);
 $('hostAddr').textContent = location.host;
+
+// Global Hub toggle
+async function toggleGlobalHub(enabled) {
+  try {
+    const resp = await fetch('/api/global-hub', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ enabled }) });
+    const data = await resp.json();
+    updateHubBadge(data.enabled);
+  } catch {}
+}
+
+function updateHubBadge(enabled) {
+  const badge = $('hubBadge');
+  const toggle = $('hubToggle');
+  if (badge) { badge.textContent = enabled ? 'ON' : 'OFF'; badge.className = 'hub-badge ' + (enabled ? 'on' : 'off'); }
+  if (toggle) toggle.checked = enabled;
+}
+
+// Load initial hub state
+fetch('/api/global-hub').then(r => r.json()).then(d => updateHubBadge(d.enabled)).catch(() => {});
 
 // Vendor → full button label set. Add new vendors here.
 const VENDOR_LABELS = {
@@ -1291,6 +1452,27 @@ const server = Bun.serve({
         }
       }
     }
+    if (path === "/api/global-hub") {
+      if (req.method === "GET") {
+        return Response.json({
+          enabled: globalHubEnabled,
+          hwControllers: hwControllers.size,
+          webControllers: slots.filter(s => s.ws).length,
+          totalSlots: hwSlotMap.size + slots.filter(s => s.ws).length,
+          mappings: Object.fromEntries(Array.from(hwSlotMap.entries()).map(([ep, idx]) => [ep, idx + 1])),
+          grabbed: Array.from(grabbedFds.keys()),
+        });
+      }
+      if (req.method === "POST") {
+        try {
+          const body: { enabled: boolean } = await req.json();
+          if (body.enabled) enableGlobalHub(); else disableGlobalHub();
+          return Response.json({ ok: true, enabled: globalHubEnabled });
+        } catch (e: any) {
+          return Response.json({ ok: false, error: e.message }, { status: 400 });
+        }
+      }
+    }
     if (path === "/debug") {
       const hw = Array.from(hwControllers.values()).map(h => ({
         name: h.name, eventPath: h.eventPath,
@@ -1317,6 +1499,7 @@ const server = Bun.serve({
       let idx = -1;
       if (d.wantPlayer >= 1 && d.wantPlayer <= MAX_PLAYERS) {
         idx = d.wantPlayer - 1;
+        ensureSlot(idx);
         if (slots[idx].ws) {
           try { slots[idx].ws.send(JSON.stringify({ type: "kicked" })); } catch {}
           try { slots[idx].ws.close(); } catch {}
@@ -1328,7 +1511,7 @@ const server = Bun.serve({
       }
 
       if (idx === -1) {
-        try { ws.send(JSON.stringify({ type: "error", message: "All 4 slots full" })); ws.close(); } catch {}
+        try { ws.send(JSON.stringify({ type: "error", message: "All slots full" })); ws.close(); } catch {}
         return;
       }
 

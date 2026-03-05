@@ -739,14 +739,21 @@ function cleanupDolphin(): void {
   dolphinProc = null;
   currentRom = "";
   currentState = "idle";
-  // Disable hw forwarding when Dolphin stops
+  // Disable hw forwarding when Dolphin stops (only if we enabled it — not when Global Hub is active)
   if (hotplugMode) {
-    fetch("https://127.0.0.1:3461/api/hw-forwarding", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled: false }),
-      tls: { rejectUnauthorized: false },
-    }).catch(() => {});
+    fetch("https://127.0.0.1:3461/api/global-hub", { tls: { rejectUnauthorized: false } })
+      .then(r => r.json())
+      .then((d: any) => {
+        if (!d.enabled) {
+          // Hub not active — we enabled forwarding ourselves, so disable it
+          fetch("https://127.0.0.1:3461/api/hw-forwarding", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: false }),
+            tls: { rejectUnauthorized: false },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
   }
   restartKiosk();
 }
@@ -1174,7 +1181,19 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
 
   // Generate controller config
   try {
-    if (hotplugMode) {
+    // Check if Global Controller Hub is active
+    let hubActive = false;
+    try {
+      const hubResp = await fetch("https://127.0.0.1:3461/api/global-hub", { tls: { rejectUnauthorized: false } });
+      const hubData = await hubResp.json() as any;
+      hubActive = hubData.enabled;
+    } catch {}
+
+    if (hubActive) {
+      // Global Hub handles all controller routing — just generate Virtual Gamepad configs
+      generateVirtualPadConfig();
+      console.log("[input] Global Controller Hub active — using Virtual Gamepad configs");
+    } else if (hotplugMode) {
       generateVirtualPadConfig();
       // Enable hw→uinput forwarding on virtual-pad server
       try {
@@ -1569,6 +1588,10 @@ const HTML = `<!DOCTYPE html>
         <span style="position:absolute;inset:0;background:#333;border-radius:11px;transition:0.2s"></span>
         <span style="position:absolute;top:2px;left:2px;width:18px;height:18px;background:#666;border-radius:50%;transition:0.2s" id="virtualPadsKnob"></span>
       </label>
+    </div>
+    <div id="globalHubNotice" style="display:none;padding:10px 12px;margin-bottom:12px;background:#1a2a3a;border:1px solid #4a9eff44;border-radius:8px;font-size:12px;color:#8cb8e0">
+      🌐 <b>Global Controller Hub</b> is active — hardware controllers are exclusively routed through Virtual Gamepad slots.
+      <a id="hubLink" href="#" target="_blank" style="color:#4a9eff;text-decoration:none;margin-left:4px">Manage →</a>
     </div>
     <div id="controllersList"></div>
   </div>
@@ -2006,12 +2029,13 @@ async function restartDolphin() {
 // ── Settings ──
 async function loadSettings() {
   try {
+    await checkGlobalHub();
     const resp = await fetch('/api/settings');
     settings = await resp.json();
     renderSettings();
     renderControllers();
-    // Start/stop controller polling based on hotplug mode
-    if (settings.hotplugMode) {
+    // Start/stop controller polling based on mode
+    if (settings.hotplugMode || globalHubActive) {
       if (window._ctrlPoll) { clearInterval(window._ctrlPoll); window._ctrlPoll = null; }
     } else if (!window._ctrlPoll) {
       window._ctrlPoll = setInterval(pollControllers, 1500);
@@ -2249,32 +2273,64 @@ async function saveSettings() {
 }
 
 // ── Controllers ──
+let globalHubActive = false;
+
+async function checkGlobalHub() {
+  try {
+    const resp = await fetch('https://' + location.hostname + ':3461/api/global-hub');
+    const data = await resp.json();
+    globalHubActive = data.enabled;
+  } catch { globalHubActive = false; }
+}
+
 function renderControllers() {
   if (!settings || !settings.controllers) return;
   const ctrls = settings.controllers;
   const isHotplug = settings.hotplugMode;
 
-  // Update hotplug toggle
+  const notice = $('globalHubNotice');
   const toggle = $('hotplugToggle');
   const knob = $('hotplugKnob');
-  if (toggle) toggle.checked = isHotplug;
-  if (knob) {
-    knob.style.left = isHotplug ? '20px' : '2px';
-    knob.style.background = isHotplug ? '#4a9eff' : '#666';
-    knob.parentElement.querySelector('span').style.background = isHotplug ? '#1a3a5c' : '#333';
-  }
-
-  // Update virtual pads toggle (only visible when hotplug is off)
   const vpRow = $('virtualPadsRow');
   const vpToggle = $('virtualPadsToggle');
   const vpKnob = $('virtualPadsKnob');
+
+  // Global Hub overrides: disable toggles, show notice
+  if (notice) {
+    notice.style.display = globalHubActive ? 'block' : 'none';
+    const hubLink = $('hubLink');
+    if (hubLink) hubLink.href = 'https://' + location.hostname + ':3461/view';
+  }
+  if (globalHubActive) {
+    if (toggle) { toggle.checked = false; toggle.disabled = true; }
+    if (knob) { knob.style.left = '2px'; knob.style.background = '#444'; knob.style.opacity = '0.4'; knob.parentElement.style.opacity = '0.4'; knob.parentElement.style.pointerEvents = 'none'; knob.parentElement.querySelector('span').style.background = '#222'; }
+    if (vpRow) vpRow.style.display = 'none';
+  } else {
+    if (toggle) { toggle.checked = isHotplug; toggle.disabled = false; }
+    if (knob) {
+      knob.style.opacity = '1'; knob.parentElement.style.opacity = '1'; knob.parentElement.style.pointerEvents = 'auto';
+      knob.style.left = isHotplug ? '20px' : '2px';
+      knob.style.background = isHotplug ? '#4a9eff' : '#666';
+      knob.parentElement.querySelector('span').style.background = isHotplug ? '#1a3a5c' : '#333';
+    }
+  }
+
+  // Update virtual pads toggle (only visible when hotplug is off and hub is off)
   const isVP = settings.virtualPadsEnabled;
-  if (vpRow) vpRow.style.display = isHotplug ? 'none' : 'flex';
-  if (vpToggle) vpToggle.checked = isVP;
-  if (vpKnob) {
-    vpKnob.style.left = isVP ? '20px' : '2px';
-    vpKnob.style.background = isVP ? '#4a9eff' : '#666';
-    vpKnob.parentElement.querySelector('span').style.background = isVP ? '#1a3a5c' : '#333';
+  if (!globalHubActive) {
+    if (vpRow) vpRow.style.display = isHotplug ? 'none' : 'flex';
+    if (vpToggle) vpToggle.checked = isVP;
+    if (vpKnob) {
+      vpKnob.style.left = isVP ? '20px' : '2px';
+      vpKnob.style.background = isVP ? '#4a9eff' : '#666';
+      vpKnob.parentElement.querySelector('span').style.background = isVP ? '#1a3a5c' : '#333';
+    }
+  }
+
+  if (globalHubActive) {
+    $('ctrlCount').textContent = '(hub)';
+    $('controllersList').innerHTML = '<div class="platform-empty" style="color:#4a9eff">🌐 All controllers routed through Global Controller Hub.<br><span style="color:#666;font-size:11px">Hardware priority enforced globally. Dolphin sees Virtual Gamepad devices.</span></div>';
+    return;
   }
 
   if (isHotplug) {
@@ -2345,8 +2401,7 @@ function startPolling() {
 }
 
 // ── Init ──
-loadStatus();
-loadRoms();
+checkGlobalHub().then(() => { loadStatus(); loadRoms(); });
 loadSettings();
 loadProfilesData();
 startPolling();

@@ -17,6 +17,9 @@ dolphin/dolphin-hotplug.json
 dolphin/data/gamecube/roms/
 dolphin/data/wii/roms/
 
+# Virtual Pad data
+virtual-pad/virtual-pad-config.json
+
 # SpaghettiKart data
 spaghetti-kart/sk-profiles.json
 spaghetti-kart/sk-prev-settings.json
