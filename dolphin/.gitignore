@@ -1,0 +1,24 @@
+# Ignore everything except code and config
+*
+!.gitignore
+!*.ts
+!*.json
+!*.md
+!data/
+!data/Config/
+!data/Config/*.ini
+!data/Config/GCPadNew.ini
+!data/Config/GCKeyNew.ini
+!data/Config/WiimoteNew.ini
+!data/Config/Dolphin.ini
+!data/Config/GFX.ini
+!data/Config/DSUClient.ini
+!data/Config/FreeLook.ini
+!data/Config/Logger.ini
+!data/Config/RetroAchievements.ini
+data/Config/TimePlayed.ini
+data/Config/btdinf.bak
+data/Wii/
+data/GC/
+data/gamecube/roms/
+data/wii/roms/
