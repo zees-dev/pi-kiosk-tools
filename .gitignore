@@ -28,3 +28,7 @@ spaghetti-kart/sk-prev-settings.json
 dashboard/uinput-mouse
 virtual-pad/uinput-gamepad
 device-names.json
+
+# Dolphin runtime data
+dolphin/data/Wii/
+dolphin/data/Config/TimePlayed.ini
