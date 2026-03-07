@@ -29,6 +29,8 @@ dashboard/uinput-mouse
 virtual-pad/uinput-gamepad
 device-names.json
 
-# Dolphin runtime data
+# Dolphin runtime/save data
 dolphin/data/Wii/
+dolphin/data/GC/
 dolphin/data/Config/TimePlayed.ini
+dolphin/data/Config/btdinf.bak
