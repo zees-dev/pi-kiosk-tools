@@ -173,27 +173,33 @@ function run(cmd: string, timeout = 10000): string {
   }
 }
 
+const EXEC_OPTS = (timeout = 10000) => ({
+  timeout,
+  env: { ...process.env, PATH: "/run/current-system/sw/bin:/run/wrappers/bin:" + (process.env.PATH || "") },
+});
+
 function stopKiosk(): void {
   try {
-    execSync(`${SUDO} systemctl stop kiosk.service`, { timeout: 10000 });
+    execSync(`${SUDO} systemctl stop kiosk.service`, EXEC_OPTS());
   } catch {}
 }
 
 function restartKiosk(): void {
   try {
     // Remove any runtime drop-in overrides (e.g. Restart=no from other tools)
-    execSync(`${SUDO} rm -rf /run/systemd/system/kiosk.service.d`, { timeout: 5000 });
-    execSync(`${SUDO} systemctl daemon-reload`, { timeout: 5000 });
+    execSync(`${SUDO} rm -rf /run/systemd/system/kiosk.service.d`, EXEC_OPTS(5000));
+    execSync(`${SUDO} systemctl daemon-reload`, EXEC_OPTS(5000));
   } catch {}
   try {
-    execSync(`${SUDO} systemctl restart kiosk.service`, { timeout: 10000 });
+    execSync(`${SUDO} systemctl restart kiosk.service`, EXEC_OPTS());
   } catch {
-    // Restart timed out — Cage is stuck. Force kill and retry.
-    console.log("[kiosk] restart timed out, force-killing Cage/Chromium");
-    try { execSync(`${SUDO} pkill -9 -f cage`, { timeout: 3000 }); } catch {}
-    try { execSync(`${SUDO} pkill -9 -f chromium-kiosk`, { timeout: 3000 }); } catch {}
-    try { execSync(`${SUDO} systemctl reset-failed kiosk.service`, { timeout: 3000 }); } catch {}
-    try { execSync(`${SUDO} systemctl start kiosk.service`, { timeout: 10000 }); } catch (e: any) {
+    // Restart timed out — Cage is stuck. Kill all kiosk user processes to release seatd/DRM.
+    console.log("[kiosk] restart timed out, force-killing all kiosk processes");
+    try { execSync(`${SUDO} killall -9 -u kiosk`, EXEC_OPTS(3000)); } catch {}
+    // Wait for processes to die and seatd to release
+    try { execSync("sleep 2", EXEC_OPTS(5000)); } catch {}
+    try { execSync(`${SUDO} systemctl reset-failed kiosk.service`, EXEC_OPTS(3000)); } catch {}
+    try { execSync(`${SUDO} systemctl start kiosk.service`, EXEC_OPTS(15000)); } catch (e: any) {
       console.log(`[kiosk] failed to start after force-kill: ${e.message}`);
     }
   }

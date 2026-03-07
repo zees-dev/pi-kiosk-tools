@@ -1,37 +1,39 @@
+[Analytics]
+Enabled = False
+ID = fbe75ef523cfeca35e39390c0428e669
+PermissionAsked = True
 [Core]
-GFXBackend = Vulkan
-EmulationSpeed = 1.0
-CPUCore = 1
-OverclockEnable = True
-Overclock = 2.0
-DSPHLE = True
-SkipIdle = True
-SyncGPU = False
-Fastmem = True
-MMU = False
-FPRF = False
 AudioStretch = True
+CPUCore = 1
+CPUThread = True
+DSPHLE = True
+EmulationSpeed = 1.0
+Fastmem = True
+FPRF = False
+GFXBackend = Vulkan
+MMU = False
+Overclock = 1.0
+OverclockEnable = False
 SIDevice0 = 6
 SIDevice1 = 6
 SIDevice2 = 6
 SIDevice3 = 6
-CPUThread = True
+SkipIdle = True
+SyncGPU = False
 SyncGPUOnSkipIdleHack = True
+[Display]
+Fullscreen = True
+[DSP]
+DSPThread = True
 [General]
 ISOPath0 = /home/pi/roms/gamecube
 ISOPaths = 1
 ShowActiveTitle = False
 WirelessMac = 00:17:ab:e8:fc:7d
-[Analytics]
-PermissionAsked = True
-Enabled = False
-ID = fbe75ef523cfeca35e39390c0428e669
 [Interface]
 ConfirmStop = False
-UsePanicHandlers = False
 OnScreenDisplayMessages = False
-[Display]
-Fullscreen = True
+UsePanicHandlers = False
 [Wiimote]
 Source0 = 1
 Source1 = 1
