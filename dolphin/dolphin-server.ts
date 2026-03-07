@@ -185,23 +185,22 @@ function stopKiosk(): void {
 }
 
 function restartKiosk(): void {
+  console.log("[kiosk] restarting...");
   try {
-    // Remove any runtime drop-in overrides (e.g. Restart=no from other tools)
+    // Remove any runtime drop-in overrides
     execSync(`${SUDO} rm -rf /run/systemd/system/kiosk.service.d`, EXEC_OPTS(5000));
     execSync(`${SUDO} systemctl daemon-reload`, EXEC_OPTS(5000));
   } catch {}
+  // Always force-kill all kiosk processes first — Cage 0.2.1 leaves orphans after assertion crash
+  try { execSync(`${SUDO} killall -9 -u kiosk`, EXEC_OPTS(3000)); } catch {}
+  // Wait for seatd to release the DRM seat
+  try { execSync("sleep 2", EXEC_OPTS(5000)); } catch {}
+  try { execSync(`${SUDO} systemctl reset-failed kiosk.service`, EXEC_OPTS(3000)); } catch {}
   try {
-    execSync(`${SUDO} systemctl restart kiosk.service`, EXEC_OPTS());
-  } catch {
-    // Restart timed out — Cage is stuck. Kill all kiosk user processes to release seatd/DRM.
-    console.log("[kiosk] restart timed out, force-killing all kiosk processes");
-    try { execSync(`${SUDO} killall -9 -u kiosk`, EXEC_OPTS(3000)); } catch {}
-    // Wait for processes to die and seatd to release
-    try { execSync("sleep 2", EXEC_OPTS(5000)); } catch {}
-    try { execSync(`${SUDO} systemctl reset-failed kiosk.service`, EXEC_OPTS(3000)); } catch {}
-    try { execSync(`${SUDO} systemctl start kiosk.service`, EXEC_OPTS(15000)); } catch (e: any) {
-      console.log(`[kiosk] failed to start after force-kill: ${e.message}`);
-    }
+    execSync(`${SUDO} systemctl start kiosk.service`, EXEC_OPTS(15000));
+    console.log("[kiosk] started successfully");
+  } catch (e: any) {
+    console.log(`[kiosk] failed to start: ${e.message}`);
   }
 }
 
@@ -1550,12 +1549,14 @@ const HTML = `<!DOCTYPE html>
     <div class="np-mode" id="npMode"></div>
     <button class="stop-btn" id="stopBtn" onclick="stopDolphin()">⏹ Stop & Return to Kiosk</button>
     <button class="stop-btn" id="restartBtn" onclick="restartDolphin()" style="background:#4a9eff; margin-top:8px">🔄 Restart Emulator</button>
+    <button class="stop-btn" id="forceKillBtn" onclick="forceKillKiosk()" style="background:#333; color:#aaa; margin-top:8px; font-size:12px; padding:8px 16px">🔌 Force Kill & Restart Kiosk</button>
   </div>
 
   <div id="idleContent">
     <div class="actions-bar">
       <button class="action-btn" onclick="refreshRoms()">🔄 Refresh ROMs</button>
       <button class="action-btn gui" onclick="launchUI()" title="Unavailable — no Xwayland on this kiosk" style="opacity:0.4;cursor:not-allowed">🖥️ Dolphin UI (N/A)</button>
+      <button class="action-btn" onclick="forceKillKiosk()" style="color:#aaa;font-size:12px" title="Force kill stuck kiosk and restart">🔌 Force Restart Kiosk</button>
     </div>
 
     <div id="romsContainer"></div>
@@ -2015,6 +2016,26 @@ async function stopDolphin() {
   } catch { showToast('Request failed', 'error'); }
   btn.disabled = false;
   btn.textContent = '⏹ Stop & Return to Kiosk';
+  loadStatus();
+}
+
+async function forceKillKiosk() {
+  if (!confirm('Force kill all kiosk processes and restart?\\n\\nUse this if the screen is stuck on black.')) return;
+  const btn = $('forceKillBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Killing...';
+  showToast('Force killing kiosk...');
+  try {
+    const resp = await fetch('/api/force-restart-kiosk', { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Kiosk restarted');
+    } else {
+      showToast(data.error || 'Failed', 'error');
+    }
+  } catch { showToast('Request failed', 'error'); }
+  btn.disabled = false;
+  btn.textContent = '🔌 Force Kill & Restart Kiosk';
   loadStatus();
 }
 
@@ -2585,6 +2606,15 @@ const server = serve({
     if (path === "/api/stop" && req.method === "POST") {
       const result = await stopDolphin();
       return Response.json(result);
+    }
+
+    if (path === "/api/force-restart-kiosk" && req.method === "POST") {
+      // Kill Dolphin if running, then force-restart kiosk
+      if (dolphinProc) {
+        try { await stopDolphin(); } catch {}
+      }
+      restartKiosk();
+      return Response.json({ ok: true });
     }
 
     // API: Get settings
