@@ -784,6 +784,7 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>Virtual Gamepad</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0a; color: #e0e0e0;
@@ -791,7 +792,7 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
 
   /* Status — top right */
   .status { position: fixed; top: 6px; right: 10px; display: flex; align-items: center; gap: 6px; z-index: 10; }
-  .player-badge { background: #222; border: 1px solid #444; border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
+  .player-badge { background: #222; border: 1px solid #444; border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: 600; cursor: pointer; }
   .p1 { color: #4a9eff; border-color: #4a9eff44; }
   .p2 { color: #f44336; border-color: #f4433644; }
   .p3 { color: #4CAF50; border-color: #4CAF5044; }
@@ -1090,6 +1091,10 @@ function flush() { net.send(buttons, lx, ly, rx, ry, l2, r2, gpVendor); updateHu
 const badge = document.getElementById('playerBadge');
 const dot = document.getElementById('connDot');
 net.onAssign(p => { badge.textContent = 'P' + p; badge.className = 'player-badge p' + p; });
+badge.addEventListener('click', () => {
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  else document.documentElement.requestFullscreen().catch(() => {});
+});
 net.onState(s => {
   dot.className = 'conn-dot ' + s;
 });
@@ -1218,6 +1223,13 @@ document.querySelectorAll('[data-btn]').forEach(el => {
   }, { passive: false });
 
   dpad.addEventListener('touchcancel', e => { e.preventDefault(); reset(); }, { passive: false });
+
+  // Mouse support for desktop/iframe debugging
+  let mouseDown = false;
+  dpad.addEventListener('mousedown', e => { e.preventDefault(); mouseDown = true; update(e.clientX, e.clientY); });
+  dpad.addEventListener('mousemove', e => { if (mouseDown) update(e.clientX, e.clientY); });
+  dpad.addEventListener('mouseup', e => { e.preventDefault(); mouseDown = false; reset(); });
+  dpad.addEventListener('mouseleave', e => { if (mouseDown) { mouseDown = false; reset(); } });
 })();
 
 // ═══════════════════════════════════════════════════════════════
@@ -1305,6 +1317,14 @@ _menuBtn.addEventListener('touchstart', e => {
 }, { passive: false });
 _menuBtn.addEventListener('touchend', e => { e.preventDefault(); clearTimeout(_menuTimer); _menuBtn.classList.remove('holding'); }, { passive: false });
 _menuBtn.addEventListener('touchcancel', () => { clearTimeout(_menuTimer); _menuBtn.classList.remove('holding'); });
+// Mouse support for desktop/iframe debugging
+_menuBtn.addEventListener('mousedown', e => {
+  e.preventDefault();
+  _menuBtn.classList.add('holding');
+  _menuTimer = setTimeout(() => { _menuBtn.classList.remove('holding'); openSettings(); }, 1000);
+});
+_menuBtn.addEventListener('mouseup', e => { e.preventDefault(); clearTimeout(_menuTimer); _menuBtn.classList.remove('holding'); });
+_menuBtn.addEventListener('mouseleave', () => { clearTimeout(_menuTimer); _menuBtn.classList.remove('holding'); });
 _closeBtn.addEventListener('click', () => closeSettings(false));
 window.addEventListener('popstate', e => { if (_modal.classList.contains('open')) { closeSettings(true); } });
 
@@ -1528,10 +1548,11 @@ const VIEW_HTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Controllers</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎛️</text></svg>">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { background: #0f0f0f; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; min-height: 100vh; }
-  .container { max-width: 960px; margin: 0 auto; padding: 20px; }
+  .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
   h1 { font-size: 20px; font-weight: 600; margin-bottom: 20px; }
   .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #666; font-weight: 600; margin: 24px 0 10px; }
   .grid { display: flex; flex-wrap: wrap; gap: 12px; }
@@ -1587,6 +1608,29 @@ const VIEW_HTML = `<!DOCTYPE html>
   .toggle .knob:before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; bottom: 3px; background: #888; border-radius: 50%; transition: .2s; }
   .toggle input:checked+.knob { background: #4a9eff; }
   .toggle input:checked+.knob:before { transform: translateX(18px); background: #fff; }
+
+  /* Debug controllers */
+  .debug-controls { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .debug-btn { padding: 8px 16px; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; color: #ccc; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+  .debug-btn:hover { background: #222; border-color: #4a9eff; color: #fff; }
+  .debug-btn.danger { border-color: #f4433644; color: #f44336; }
+  .debug-btn.danger:hover { background: #3a1a1a; border-color: #f44336; }
+  .debug-btn:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
+  .debug-count { font-size: 11px; color: #555; margin-left: auto; }
+  .debug-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; align-items: start; }
+  .debug-frame-wrap { background: #1a1a1a; border: 1px solid #282828; border-radius: 10px; overflow: hidden; animation: fadeIn 0.2s ease; }
+  .debug-frame-wrap.landscape { grid-column: span 2; }
+  .debug-frame-header { display: flex; align-items: center; gap: 2px; padding: 4px 4px 4px 8px; border-bottom: 1px solid #222; }
+  .debug-frame-url { flex: 1; min-width: 0; background: transparent; border: 1px solid transparent; border-radius: 4px; padding: 3px 6px; font-size: 10px; color: #444; font-family: monospace; outline: none; transition: all 0.15s; cursor: default; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+  .debug-frame-url:hover { color: #888; border-color: #333; cursor: text; }
+  .debug-frame-url:focus { background: #111; border-color: #4a9eff; color: #fff; cursor: text; }
+  .debug-frame-btn { width: 24px; height: 24px; background: none; border: 1px solid transparent; border-radius: 4px; color: #555; font-size: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s; flex-shrink: 0; }
+  .debug-frame-btn:hover { border-color: #444; color: #ccc; }
+  .debug-frame-btn.close { color: #f4433666; }
+  .debug-frame-btn.close:hover { border-color: #f44336; color: #f44336; background: #3a1a1a; }
+  .debug-frame-body { width: 100%; aspect-ratio: 9/16; overflow: hidden; background: #0f0f0f; }
+  .debug-frame-body.landscape { aspect-ratio: 16/9; }
+  .debug-frame-body iframe { width: 200%; height: 200%; border: none; transform: scale(0.5); transform-origin: top left; background: #0f0f0f; }
 </style>
 </head>
 <body>
@@ -1609,6 +1653,17 @@ const VIEW_HTML = `<!DOCTYPE html>
   <div class="section-title">Web Controllers</div>
   <div class="grid" id="webGrid"></div>
   <div class="empty-msg" id="webEmpty">Open <b>http://<span id="hostAddr"></span>/</b> on a phone to connect</div>
+
+  <!-- Debug Controllers -->
+  <div class="section-title">🐛 Debug Controllers</div>
+  <div id="debugSection">
+    <div class="debug-controls">
+      <button class="debug-btn" id="addCtrlBtn" onclick="addDebugController()">+ Add Controller</button>
+      <button class="debug-btn danger" id="clearCtrlBtn" onclick="clearDebugControllers()" disabled>Clear All</button>
+      <span class="debug-count" id="debugCount">0 controllers</span>
+    </div>
+    <div class="debug-grid" id="debugGrid"></div>
+  </div>
 
   <div class="status-bar">
     <span class="status-dot" id="viewDot"></span>
@@ -1710,7 +1765,7 @@ function renderHwCard(key, data) {
 }
 
 function refreshWebGrid() {
-  const keys = Object.keys(webPlayers).sort();
+  const keys = Object.keys(webPlayers).sort((a, b) => Number(a) - Number(b));
   $('webEmpty').style.display = keys.length ? 'none' : 'block';
   $('webGrid').innerHTML = keys.map(k => renderWebCard(k, webPlayers[k])).join('');
 }
@@ -1759,6 +1814,110 @@ function handle(msg) {
       updateViz('hw-'+CSS.escape(msg.eventPath), msg.state, hwDevices[msg.eventPath].vendor);
     }
   }
+}
+
+// ── Debug Controllers ──
+let debugCounter = 0;
+const debugFrames = new Map(); // id -> { url, iframe }
+
+function getBaseUrl() {
+  return location.protocol + '//' + location.host + '/';
+}
+
+function addDebugController(playerNum) {
+  debugCounter++;
+  const id = 'dbg-' + debugCounter;
+  const url = playerNum ? getBaseUrl() + '?player=' + playerNum : getBaseUrl();
+  
+  const wrap = document.createElement('div');
+  wrap.className = 'debug-frame-wrap';
+  wrap.id = id;
+  const header = document.createElement('div');
+  header.className = 'debug-frame-header';
+  const num = document.createElement('span');
+  num.style.cssText = 'font-size:10px;color:#555;font-weight:600;flex-shrink:0';
+  num.textContent = '#' + debugCounter;
+  const urlInput = document.createElement('input');
+  urlInput.className = 'debug-frame-url';
+  urlInput.value = url;
+  urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') { reloadDebugFrame(id); urlInput.blur(); } });
+  const reloadBtn = document.createElement('button');
+  reloadBtn.className = 'debug-frame-btn';
+  reloadBtn.title = 'Reload';
+  reloadBtn.textContent = '\u21bb';
+  reloadBtn.addEventListener('click', () => reloadDebugFrame(id));
+  const rotateBtn = document.createElement('button');
+  rotateBtn.className = 'debug-frame-btn';
+  rotateBtn.title = 'Toggle Portrait/Landscape';
+  rotateBtn.textContent = '\u{1f504}';
+  rotateBtn.addEventListener('click', () => {
+    const body = wrap.querySelector('.debug-frame-body');
+    body.classList.toggle('landscape');
+    wrap.classList.toggle('landscape');
+  });
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'debug-frame-btn close';
+  closeBtn.title = 'Disconnect & Close';
+  closeBtn.textContent = '\u2715';
+  closeBtn.addEventListener('click', () => removeDebugController(id));
+  header.append(num, urlInput, reloadBtn, rotateBtn, closeBtn);
+  const body = document.createElement('div');
+  body.className = 'debug-frame-body';
+  const iframe = document.createElement('iframe');
+  iframe.src = url;
+  iframe.allow = 'gamepad; vibrate';
+  body.appendChild(iframe);
+  wrap.append(header, body);
+
+  $('debugGrid').appendChild(wrap);
+  debugFrames.set(id, { url });
+  updateDebugCount();
+}
+
+function reloadDebugFrame(id) {
+  const wrap = document.getElementById(id);
+  if (!wrap) return;
+  const urlInput = wrap.querySelector('.debug-frame-url');
+  if (!urlInput) return;
+  const newUrl = urlInput.value.trim() || getBaseUrl();
+  const body = wrap.querySelector('.debug-frame-body');
+  body.innerHTML = '';
+  const iframe = document.createElement('iframe');
+  iframe.src = newUrl;
+  iframe.allow = 'gamepad; vibrate';
+  body.appendChild(iframe);
+  debugFrames.set(id, { url: newUrl });
+}
+
+function removeDebugController(id) {
+  const wrap = document.getElementById(id);
+  if (!wrap) return;
+  // Remove iframe first to trigger WS disconnect
+  const iframe = wrap.querySelector('iframe');
+  if (iframe) iframe.src = 'about:blank';
+  wrap.classList.add('removing');
+  setTimeout(() => { wrap.remove(); debugFrames.delete(id); updateDebugCount(); }, 200);
+}
+
+function clearDebugControllers() {
+  debugFrames.forEach((_, id) => {
+    const wrap = document.getElementById(id);
+    if (wrap) {
+      const iframe = wrap.querySelector('iframe');
+      if (iframe) iframe.src = 'about:blank';
+    }
+  });
+  setTimeout(() => {
+    $('debugGrid').innerHTML = '';
+    debugFrames.clear();
+    debugCounter = 0;
+    updateDebugCount();
+  }, 100);
+}
+
+function updateDebugCount() {
+  $('debugCount').textContent = debugFrames.size + ' controller' + (debugFrames.size !== 1 ? 's' : '');
+  $('clearCtrlBtn').disabled = debugFrames.size === 0;
 }
 
 function connectView() {
