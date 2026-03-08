@@ -788,7 +788,6 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0a; color: #e0e0e0;
     font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; touch-action: none; user-select: none; }
-  .container { display: flex; flex-direction: column; height: 100%; }
 
   /* Status — top right */
   .status { position: fixed; top: 6px; right: 10px; display: flex; align-items: center; gap: 6px; z-index: 10; }
@@ -802,79 +801,171 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
   .conn-dot.connecting { background: #FFC107; animation: pulse 1s infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-  /* Gamepad layout */
-  .gamepad { flex: 1; display: flex; position: relative; }
-  .left { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; }
-  .right { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; }
-  .center { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; width: 80px; }
+  /* ─── CSS Grid portrait layout ─── */
+  /* 4 rows: top-bar | hud | shoulders+center | dpad+face | sticks */
+  .grid { display: grid; width: 100%; height: 100%; grid-template-rows: auto auto auto 1.4fr 1fr; grid-template-columns: 1fr 1fr; }
+  .grid.show-zones .zone { border: 1px solid rgba(74,158,255,0.12); }
+
+  /* Row 1: top bar — settings button only */
+  .zone-top { grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; padding: 8px 6px; }
+
+  /* Row 2: HUD diagnostics (spans full width) */
+  .zone-hud { grid-column: 1 / -1; display: flex; align-items: center; justify-content: center; padding: 2px 6px; }
+
+  /* Row 3: shoulders with center buttons between them */
+  .zone-shoulders { grid-column: 1 / -1; display: flex; justify-content: space-between; align-items: center; padding: 6px 6px; margin-top: 20vh; }
+  .shoulder-stack { display: flex; flex-direction: column; gap: 4px; }
+  .center-col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
   .center-row { display: flex; gap: 6px; }
+  .sm-btn { width: 36px; height: 28px; background: rgba(26,26,26,0.85); border: 1px solid #333; border-radius: 14px; font-size: 9px; font-weight: 600; color: #666; display: flex; align-items: center; justify-content: center; transition: all 0.05s; }
+  .sm-btn.pressed { background: rgba(74,158,255,0.2); color: #fff; border-color: #4a9eff; }
+  .home-btn { width: 30px; height: 30px; border-radius: 50%; font-size: 13px; }
+  .shoulder-btn { padding: 10px 18px; background: rgba(26,26,26,0.85); border: 1px solid #333; border-radius: 8px; font-size: 13px; font-weight: 600; color: #888; transition: all 0.05s; text-align: center; }
+  .shoulder-btn.pressed { background: rgba(74,158,255,0.2); color: #fff; border-color: #4a9eff; box-shadow: 0 0 10px rgba(74,158,255,0.3); }
+  .trigger-btn { padding: 10px 18px; background: rgba(26,26,26,0.85); border: 1px solid #333; border-radius: 8px; font-size: 13px; font-weight: 600; color: #888; position: relative; overflow: hidden; transition: all 0.05s; text-align: center; }
+  .trigger-btn .fill { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(74,158,255,0.35); transition: height 0.05s; }
+  .trigger-btn.pressed { background: rgba(74,158,255,0.15); color: #fff; border-color: #4a9eff; }
 
-  /* D-pad */
-  .dpad { position: relative; width: 120px; height: 120px; }
-  .dpad-btn { position: absolute; background: #1a1a1a; border: 1px solid #333; display: flex; align-items: center; justify-content: center; font-size: 18px; color: #888; transition: background 0.05s; }
-  .dpad-btn.pressed { background: #333; color: #fff; }
-  .dpad-up { top: 0; left: 36px; width: 48px; height: 48px; border-radius: 8px 8px 0 0; }
-  .dpad-down { bottom: 0; left: 36px; width: 48px; height: 48px; border-radius: 0 0 8px 8px; }
-  .dpad-left { top: 36px; left: 0; width: 48px; height: 48px; border-radius: 8px 0 0 8px; }
-  .dpad-right { top: 36px; right: 0; width: 48px; height: 48px; border-radius: 0 8px 8px 0; }
-  .dpad-center { top: 36px; left: 36px; width: 48px; height: 48px; background: #151515; border: none; }
+  /* Row 4: dpad (left) + face buttons (right) */
+  .zone-dpad { display: flex; align-items: flex-end; justify-content: center; padding-bottom: 8px; }
+  .dpad { width: 130px; height: 130px; position: relative; touch-action: none; }
+  .dpad-btn { position: absolute; background: rgba(26,26,26,0.85); border: 1px solid #444; display: flex; align-items: center; justify-content: center; font-size: 20px; color: #888; transition: all 0.05s; pointer-events: none; }
+  .dpad-btn.pressed { background: rgba(74,158,255,0.2); color: #fff; border-color: #4a9eff; box-shadow: inset 0 0 8px rgba(74,158,255,0.3); }
+  .dpad-up { top: 0; left: 39px; width: 52px; height: 52px; border-radius: 10px 10px 0 0; }
+  .dpad-down { bottom: 0; left: 39px; width: 52px; height: 52px; border-radius: 0 0 10px 10px; }
+  .dpad-left { top: 39px; left: 0; width: 52px; height: 52px; border-radius: 10px 0 0 10px; }
+  .dpad-right { top: 39px; right: 0; width: 52px; height: 52px; border-radius: 0 10px 10px 0; }
+  .dpad-center { position: absolute; top: 39px; left: 39px; width: 52px; height: 52px; background: rgba(21,21,21,0.6); border: none; pointer-events: none; }
 
-  /* Sticks */
-  .stick-zone { width: 120px; height: 120px; background: #141414; border: 2px solid #282828; border-radius: 50%; position: relative; }
-  .stick-thumb { width: 50px; height: 50px; background: #333; border: 2px solid #444; border-radius: 50%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); transition: background 0.05s; }
-  .stick-thumb.active { background: #4a9eff; border-color: #5ab0ff; }
-  .stick-label { font-size: 10px; color: #444; text-align: center; }
+  .zone-face { display: flex; align-items: flex-end; justify-content: center; padding-bottom: 8px; }
+  .face-buttons { width: 140px; height: 140px; position: relative; }
+  .face-btn { position: absolute; width: 50px; height: 50px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; border: 2px solid; transition: all 0.05s; }
+  .face-a { bottom: 0; left: 45px; background: #1a3a1a; border-color: #4CAF50; color: #4CAF50; }
+  .face-a.pressed { background: rgba(76,175,80,0.35); box-shadow: 0 0 12px rgba(76,175,80,0.4); }
+  .face-b { top: 45px; right: 0; background: #3a1a1a; border-color: #f44336; color: #f44336; }
+  .face-b.pressed { background: rgba(244,67,54,0.35); box-shadow: 0 0 12px rgba(244,67,54,0.4); }
+  .face-x { top: 45px; left: 0; background: #1a1a3a; border-color: #2196F3; color: #2196F3; }
+  .face-x.pressed { background: rgba(33,150,243,0.35); box-shadow: 0 0 12px rgba(33,150,243,0.4); }
+  .face-y { top: 0; left: 45px; background: #3a3a1a; border-color: #FFC107; color: #FFC107; }
+  .face-y.pressed { background: rgba(255,193,7,0.35); box-shadow: 0 0 12px rgba(255,193,7,0.4); }
 
-  /* Face buttons */
-  .face-buttons { position: relative; width: 130px; height: 130px; }
-  .face-btn { position: absolute; width: 46px; height: 46px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; border: 2px solid; transition: background 0.05s; }
-  .face-btn.pressed { filter: brightness(1.5); }
-  .face-a { bottom: 0; left: 42px; background: #1a3a1a; border-color: #4CAF50; color: #4CAF50; }
-  .face-b { top: 42px; right: 0; background: #3a1a1a; border-color: #f44336; color: #f44336; }
-  .face-x { top: 42px; left: 0; background: #1a1a3a; border-color: #2196F3; color: #2196F3; }
-  .face-y { top: 0; left: 42px; background: #3a3a1a; border-color: #FFC107; color: #FFC107; }
+  /* Row 5: sticks (left + right) */
+  .zone-stick-l, .zone-stick-r { position: relative; }
+  .pin-indicator { display: none; }
 
-  /* Shoulders */
-  .shoulders { display: flex; justify-content: space-between; padding: 0 8px; flex-shrink: 0; }
-  .shoulder-group { display: flex; gap: 4px; }
-  .shoulder-btn { padding: 10px 18px; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; font-size: 12px; font-weight: 600; color: #888; transition: background 0.05s; }
-  .shoulder-btn.pressed { background: #333; color: #fff; }
-  .trigger-btn { padding: 10px 18px; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; font-size: 12px; font-weight: 600; color: #888; position: relative; overflow: hidden; }
-  .trigger-btn .fill { position: absolute; bottom: 0; left: 0; right: 0; background: #4a9eff33; transition: height 0.05s; }
-  .trigger-btn.pressed { background: #222; color: #fff; }
+  /* Input HUD (inline in top bar) */
+  .input-hud { display: flex; align-items: center; gap: 6px; pointer-events: none; }
+  .hud-stick { width: 28px; height: 28px; background: rgba(20,20,20,0.8); border: 1px solid #333; border-radius: 50%; position: relative; }
+  .hud-stick-dot { width: 6px; height: 6px; background: #555; border-radius: 50%; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); transition: all 0.05s; }
+  .hud-stick-dot.active { background: #4da3ff; }
+  .hud-trigger { width: 8px; height: 24px; background: rgba(20,20,20,0.8); border: 1px solid #333; border-radius: 3px; position: relative; overflow: hidden; }
+  .hud-trigger-fill { position: absolute; bottom: 0; left: 0; right: 0; background: #4a9eff; transition: height 0.05s; }
+  .hud-buttons { background: rgba(20,20,20,0.8); border: 1px solid #333; border-radius: 6px; padding: 3px 8px; font-size: 11px; font-weight: 600; color: #888; min-width: 40px; text-align: center; white-space: nowrap; max-width: 50vw; overflow: hidden; }
+  .hud-buttons.active { color: #4da3ff; }
 
-  /* Small center buttons */
-  .sm-btn { width: 32px; height: 24px; background: #1a1a1a; border: 1px solid #333; border-radius: 12px; font-size: 9px; font-weight: 600; color: #666; display: flex; align-items: center; justify-content: center; }
-  .sm-btn.pressed { background: #333; color: #fff; }
-  .home-btn { width: 28px; height: 28px; border-radius: 50%; font-size: 12px; }
+  /* Menu button */
+  .menu-btn { width: 32px; height: 32px; background: rgba(26,26,26,0.85); border: 1px solid #333; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 16px; color: #666; transition: all 0.2s; position: relative; flex-shrink: 0; }
+  .menu-btn.holding { border-color: #4a9eff; }
+  .menu-btn .ring { position: absolute; inset: -2px; border-radius: 50%; border: 2px solid transparent; border-top-color: #4a9eff; transition: none; }
+  .menu-btn.holding .ring { animation: menu-spin 1s linear; }
+  @keyframes menu-spin { to { transform: rotate(360deg); } }
+  .menu-btn .dirty-dot { position: absolute; top: -2px; right: -2px; width: 8px; height: 8px; border-radius: 50%; background: #f59e0b; display: none; }
+  .menu-btn .dirty-dot.visible { display: block; }
 
-  @media (orientation: portrait) {
-    .gamepad { flex-direction: column; }
-    .left, .right { flex-direction: row; }
-  }
+  /* Settings modal */
+  .settings-overlay { position: fixed; inset: 0; background: #0a0a0a; z-index: 100; display: none; flex-direction: column; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .settings-overlay.open { display: flex; }
+  .settings-header { display: flex; align-items: center; justify-content: space-between; padding: 16px; border-bottom: 1px solid #222; flex-shrink: 0; }
+  .settings-title { font-size: 16px; font-weight: 700; color: #e0e0e0; display: flex; align-items: center; gap: 8px; }
+  .settings-title .dirty-badge { background: #f59e0b; color: #000; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 8px; display: none; }
+  .settings-title .dirty-badge.visible { display: inline-block; }
+  .settings-close { width: 36px; height: 36px; background: none; border: 1px solid #333; border-radius: 50%; color: #888; font-size: 18px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+
+  .settings-body { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 20px; }
+  .setting-section { border: 1px solid #222; border-radius: 10px; padding: 14px; background: #111; }
+  .setting-section h3 { font-size: 13px; font-weight: 600; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+  .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; }
+  .setting-row + .setting-row { border-top: 1px solid #1a1a1a; }
+  .setting-label { font-size: 14px; color: #ccc; }
+  .setting-sub { font-size: 11px; color: #666; margin-top: 2px; }
+
+  /* Toggle switch */
+  .toggle { width: 44px; height: 24px; background: #333; border-radius: 12px; position: relative; cursor: pointer; transition: background 0.2s; flex-shrink: 0; }
+  .toggle.on { background: #4a9eff; }
+  .toggle .knob { width: 20px; height: 20px; background: #fff; border-radius: 50%; position: absolute; top: 2px; left: 2px; transition: transform 0.2s; }
+  .toggle.on .knob { transform: translateX(20px); }
+
+  /* Range slider */
+  .range-row { display: flex; align-items: center; gap: 10px; width: 100%; }
+  .range-row input[type=range] { flex: 1; accent-color: #4a9eff; height: 4px; }
+  .range-val { font-size: 12px; color: #4a9eff; font-weight: 600; min-width: 36px; text-align: right; }
+
+  /* Footer buttons */
+  .settings-footer { display: flex; gap: 10px; padding: 16px; border-top: 1px solid #222; flex-shrink: 0; }
+  .settings-footer button { flex: 1; padding: 12px; border-radius: 8px; font-size: 14px; font-weight: 600; border: none; cursor: pointer; transition: opacity 0.15s; }
+  .settings-footer button:disabled { opacity: 0.3; cursor: default; }
+  .btn-revert { background: #222; color: #ccc; }
+  .btn-save { background: #4a9eff; color: #fff; }
+
+  /* nipplejs overrides */
+  .nipple { z-index: 10 !important; }
+  .nipple .back { background: rgba(60,60,60,0.5) !important; border: 2px solid rgba(100,100,100,0.4) !important; }
+  .nipple .front { background: rgba(74,158,255,0.7) !important; }
 </style>
 </head>
 <body>
-<div class="container">
   <!-- Status: top-right player badge + connection dot -->
   <div class="status">
     <span class="player-badge" id="playerBadge">P?</span>
     <span class="conn-dot connecting" id="connDot"></span>
-
   </div>
 
-  <div class="shoulders">
-    <div class="shoulder-group">
-      <div class="trigger-btn" data-btn="6"><div class="fill" id="fillL2"></div>L2</div>
-      <div class="shoulder-btn" data-btn="4">L1</div>
+  <div class="grid" id="padGrid">
+    <!-- Row 1: Settings button -->
+    <div class="zone zone-top">
+      <div class="menu-btn" id="menuBtn">
+        <div class="ring"></div>
+        <div class="dirty-dot" id="menuDirtyDot"></div>
+        ⚙
+      </div>
     </div>
-    <div class="shoulder-group">
-      <div class="shoulder-btn" data-btn="5">R1</div>
-      <div class="trigger-btn" data-btn="7"><div class="fill" id="fillR2"></div>R2</div>
+
+    <!-- Row 2: HUD diagnostics -->
+    <div class="zone zone-hud">
+      <div class="input-hud" id="inputHud">
+        <div class="hud-stick" id="hudStickL"><div class="hud-stick-dot" id="hudDotL"></div></div>
+        <div class="hud-trigger" id="hudTrigL"><div class="hud-trigger-fill" id="hudFillL"></div></div>
+        <div class="hud-buttons" id="hudButtons">·</div>
+        <div class="hud-trigger" id="hudTrigR"><div class="hud-trigger-fill" id="hudFillR"></div></div>
+        <div class="hud-stick" id="hudStickR"><div class="hud-stick-dot" id="hudDotR"></div></div>
+      </div>
     </div>
-  </div>
-  <div class="gamepad">
-    <div class="left">
+
+    <!-- Row 3: Shoulders + center buttons between them -->
+    <div class="zone zone-shoulders">
+      <div class="shoulder-stack">
+        <div class="trigger-btn" data-btn="6"><div class="fill" id="fillL2"></div>L2</div>
+        <div class="shoulder-btn" data-btn="4">L1</div>
+      </div>
+      <div class="center-col">
+        <div class="center-row">
+          <div class="sm-btn" data-btn="8">SEL</div>
+          <div class="sm-btn home-btn" data-btn="16">⊙</div>
+          <div class="sm-btn" data-btn="9">STR</div>
+        </div>
+        <div class="center-row">
+          <div class="sm-btn" data-btn="10">L3</div>
+          <div class="sm-btn" data-btn="11">R3</div>
+        </div>
+      </div>
+      <div class="shoulder-stack">
+        <div class="trigger-btn" data-btn="7"><div class="fill" id="fillR2"></div>R2</div>
+        <div class="shoulder-btn" data-btn="5">R1</div>
+      </div>
+    </div>
+
+    <!-- Row 4: D-pad (left) + Face buttons (right) -->
+    <div class="zone zone-dpad">
       <div class="dpad">
         <div class="dpad-btn dpad-up" data-btn="12">▲</div>
         <div class="dpad-btn dpad-left" data-btn="14">◀</div>
@@ -882,36 +973,62 @@ const CONTROLLER_HTML = `<!DOCTYPE html>
         <div class="dpad-btn dpad-right" data-btn="15">▶</div>
         <div class="dpad-btn dpad-down" data-btn="13">▼</div>
       </div>
-      <div>
-        <div class="stick-zone" id="stickL"><div class="stick-thumb" id="thumbL"></div></div>
-        <div class="stick-label">L3</div>
-      </div>
     </div>
-    <div class="center">
-      <div class="center-row">
-        <div class="sm-btn" data-btn="8">SEL</div>
-        <div class="sm-btn home-btn" data-btn="16">⊙</div>
-        <div class="sm-btn" data-btn="9">STR</div>
-      </div>
-      <div class="center-row">
-        <div class="sm-btn" data-btn="10">L3</div>
-        <div class="sm-btn" data-btn="11">R3</div>
-      </div>
-    </div>
-    <div class="right">
+    <div class="zone zone-face">
       <div class="face-buttons">
         <div class="face-btn face-y" data-btn="3">Y</div>
         <div class="face-btn face-x" data-btn="2">X</div>
         <div class="face-btn face-b" data-btn="1">B</div>
         <div class="face-btn face-a" data-btn="0">A</div>
       </div>
-      <div>
-        <div class="stick-zone" id="stickR"><div class="stick-thumb" id="thumbR"></div></div>
-        <div class="stick-label">R3</div>
+    </div>
+
+    <!-- Row 5: Left stick + Right stick -->
+    <div class="zone zone-stick-l" id="stickZoneL"><div class="pin-indicator" id="pinL">📌 pinned</div></div>
+    <div class="zone zone-stick-r" id="stickZoneR"><div class="pin-indicator" id="pinR">📌 pinned</div></div>
+  </div>
+
+  <!-- Settings modal -->
+  <div class="settings-overlay" id="settingsModal">
+    <div class="settings-header">
+      <div class="settings-title">⚙ Settings <span class="dirty-badge" id="dirtyBadge">modified</span></div>
+      <div class="settings-close" id="settingsClose">✕</div>
+    </div>
+    <div class="settings-body">
+      <div class="setting-section">
+        <h3>General</h3>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Haptic Feedback</div>
+            <div class="setting-sub">Vibrate on button press</div>
+          </div>
+          <div class="toggle" id="hapticToggle"><div class="knob"></div></div>
+        </div>
+        <div class="setting-row" id="hapticMsRow" style="display:none">
+          <div style="width:100%">
+            <div class="setting-label">Vibration Duration</div>
+            <div class="range-row">
+              <input type="range" id="hapticMs" min="5" max="50" step="5" value="15">
+              <span class="range-val" id="hapticMsVal">15ms</span>
+            </div>
+          </div>
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Show Grid Zones</div>
+            <div class="setting-sub">Show layout zone boundaries</div>
+          </div>
+          <div class="toggle" id="gridToggle"><div class="knob"></div></div>
+        </div>
       </div>
     </div>
+    <div class="settings-footer">
+      <button class="btn-revert" id="btnRevert" disabled>Revert to Default</button>
+      <button class="btn-save" id="btnSave" disabled>Save</button>
+    </div>
   </div>
-</div>
+
+<script src="/nipplejs.min.js"><\/script>
 
 <script>
 // ═══════════════════════════════════════════════════════════════
@@ -965,7 +1082,7 @@ let touchBtns = 0; // bits currently held by touch UI
 let gpVendor = 0;  // raw USB vendor ID from Gamepad API (e.g. 0x054c)
 
 
-function flush() { net.send(buttons, lx, ly, rx, ry, l2, r2, gpVendor); }
+function flush() { net.send(buttons, lx, ly, rx, ry, l2, r2, gpVendor); updateHud(); }
 
 // ═══════════════════════════════════════════════════════════════
 // STATUS UI — top-right badge + dot
@@ -987,11 +1104,46 @@ function setBtn(bit, on) {
   document.querySelector('[data-btn="'+bit+'"]')?.classList.toggle('pressed', on);
   if (bit === 6) { l2 = on ? 255 : 0; document.getElementById('fillL2').style.height = (on ? '100' : '0') + '%'; }
   if (bit === 7) { r2 = on ? 255 : 0; document.getElementById('fillR2').style.height = (on ? '100' : '0') + '%'; }
+  // Haptic feedback on press (uses saved settings, not draft)
+  if (on && savedSettings.hapticEnabled && navigator.vibrate) navigator.vibrate(savedSettings.hapticMs);
   flush();
 }
 
+// ── Input HUD ──
+const _hudBtns = document.getElementById('hudButtons');
+const _hudDotL = document.getElementById('hudDotL');
+const _hudDotR = document.getElementById('hudDotR');
+const _hudFillL = document.getElementById('hudFillL');
+const _hudFillR = document.getElementById('hudFillR');
+const _btnNames = {0:'A',1:'B',2:'X',3:'Y',4:'LB',5:'RB',6:'LT',7:'RT',8:'SEL',9:'STR',10:'L3',11:'R3',12:'↑',13:'↓',14:'←',15:'→',16:'⊙'};
+function updateHud() {
+  // Pressed buttons text
+  const pressed = [];
+  for (let i = 0; i < 17; i++) { if (buttons & (1 << i)) pressed.push(_btnNames[i]); }
+  _hudBtns.textContent = pressed.length ? pressed.join(' ') : '·';
+  _hudBtns.classList.toggle('active', pressed.length > 0);
+  // Left stick dot position (% within 28px box)
+  const lxP = ((lx / 255) * 100).toFixed(0);
+  const lyP = ((ly / 255) * 100).toFixed(0);
+  _hudDotL.style.left = lxP + '%';
+  _hudDotL.style.top = lyP + '%';
+  _hudDotL.classList.toggle('active', lx !== 128 || ly !== 128);
+  // Right stick dot position
+  const rxP = ((rx / 255) * 100).toFixed(0);
+  const ryP = ((ry / 255) * 100).toFixed(0);
+  _hudDotR.style.left = rxP + '%';
+  _hudDotR.style.top = ryP + '%';
+  _hudDotR.classList.toggle('active', rx !== 128 || ry !== 128);
+  // Trigger fills
+  _hudFillL.style.height = (l2 / 255 * 100).toFixed(0) + '%';
+  _hudFillR.style.height = (r2 / 255 * 100).toFixed(0) + '%';
+}
+
+// Bind non-dpad buttons (dpad uses zone-based touch handling)
+const DPAD_BITS = new Set([12, 13, 14, 15]);
 document.querySelectorAll('[data-btn]').forEach(el => {
   const b = parseInt(el.dataset.btn);
+  if (DPAD_BITS.has(b)) return; // handled by dpad zone
   el.addEventListener('touchstart', e => { e.preventDefault(); setBtn(b, true); }, { passive: false });
   el.addEventListener('touchend', e => { e.preventDefault(); setBtn(b, false); }, { passive: false });
   el.addEventListener('touchcancel', e => { e.preventDefault(); setBtn(b, false); }, { passive: false });
@@ -1000,34 +1152,259 @@ document.querySelectorAll('[data-btn]').forEach(el => {
   el.addEventListener('mouseleave', e => { if (e.buttons) setBtn(b, false); });
 });
 
-function setupStick(zoneId, thumbId, isRight, clickBit) {
-  const zone = document.getElementById(zoneId), thumb = document.getElementById(thumbId), maxD = 35;
-  let active = false, tid = null;
-  function upd(cx2, cy2) {
-    const r = zone.getBoundingClientRect(), cx = r.left + r.width/2, cy = r.top + r.height/2;
-    let dx = cx2-cx, dy = cy2-cy, d = Math.sqrt(dx*dx+dy*dy);
-    if (d > maxD) { dx = dx/d*maxD; dy = dy/d*maxD; }
-    thumb.style.transform = 'translate(calc(-50% + '+dx+'px),calc(-50% + '+dy+'px))';
-    const nx = Math.round(128+(dx/maxD)*127), ny = Math.round(128+(dy/maxD)*127);
-    if (isRight) { rx=nx; ry=ny; } else { lx=nx; ly=ny; }
-    flush();
+// ── D-pad zone touch handler ──
+// Treats entire dpad as one touch zone. Direction based on angle from center.
+// Diagonals activate two adjacent directions. Dead zone in center.
+(() => {
+  const dpad = document.querySelector('.dpad');
+  const DEAD = 0.2; // dead zone ratio (center 20%)
+  let tid = null;
+  let curDirs = { up: false, down: false, left: false, right: false };
+  const bits = { up: 12, down: 13, left: 14, right: 15 };
+
+  function update(cx, cy) {
+    const r = dpad.getBoundingClientRect();
+    const mx = r.left + r.width / 2, my = r.top + r.height / 2;
+    const dx = (cx - mx) / (r.width / 2);
+    const dy = (cy - my) / (r.height / 2);
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    const next = { up: false, down: false, left: false, right: false };
+    if (dist > DEAD) {
+      const angle = Math.atan2(dy, dx); // radians, 0=right, PI/2=down
+      // Each cardinal owns 135° centered on its axis (67.5° each side).
+      // Adjacent cardinals overlap by 45° = diagonal zones.
+      // up=-90°, right=0°, down=90°, left=±180°
+      const deg = angle * 180 / Math.PI;
+      if (deg >= -157.5 && deg <= -22.5) next.up = true;     // -157.5 to -22.5
+      if (deg >= -67.5 && deg <= 67.5) next.right = true;    // -67.5 to 67.5
+      if (deg >= 22.5 && deg <= 157.5) next.down = true;     // 22.5 to 157.5
+      if (deg >= 112.5 || deg <= -112.5) next.left = true;   // wraps around ±180
+    }
+
+    for (const dir of ['up', 'down', 'left', 'right']) {
+      if (next[dir] !== curDirs[dir]) setBtn(bits[dir], next[dir]);
+    }
+    curDirs = next;
   }
-  function rst() {
-    thumb.style.transform = 'translate(-50%,-50%)'; thumb.classList.remove('active');
-    if (isRight) { rx=128; ry=128; } else { lx=128; ly=128; }
-    active=false; tid=null; flush();
+
+  function reset() {
+    for (const dir of ['up', 'down', 'left', 'right']) {
+      if (curDirs[dir]) setBtn(bits[dir], false);
+    }
+    curDirs = { up: false, down: false, left: false, right: false };
+    tid = null;
   }
-  zone.addEventListener('touchstart', e => { e.preventDefault(); const t=e.changedTouches[0]; tid=t.identifier; active=true; thumb.classList.add('active'); upd(t.clientX,t.clientY); }, {passive:false});
-  zone.addEventListener('touchmove', e => { e.preventDefault(); for(const t of e.changedTouches) if(t.identifier===tid){upd(t.clientX,t.clientY);break;} }, {passive:false});
-  zone.addEventListener('touchend', e => { e.preventDefault(); for(const t of e.changedTouches) if(t.identifier===tid){rst();break;} }, {passive:false});
-  zone.addEventListener('touchcancel', e => { e.preventDefault(); rst(); }, {passive:false});
-  let lt=0; zone.addEventListener('touchstart', ()=>{ const n=Date.now(); if(n-lt<300){setBtn(clickBit,true);setTimeout(()=>setBtn(clickBit,false),100);} lt=n; });
-  zone.addEventListener('mousedown', e => { active=true; thumb.classList.add('active'); upd(e.clientX,e.clientY); });
-  window.addEventListener('mousemove', e => { if(active) upd(e.clientX,e.clientY); });
-  window.addEventListener('mouseup', () => { if(active) rst(); });
+
+  dpad.addEventListener('touchstart', e => {
+    e.preventDefault();
+    const t = e.changedTouches[0];
+    tid = t.identifier;
+    update(t.clientX, t.clientY);
+  }, { passive: false });
+
+  dpad.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      if (t.identifier === tid) { update(t.clientX, t.clientY); break; }
+    }
+  }, { passive: false });
+
+  dpad.addEventListener('touchend', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      if (t.identifier === tid) { reset(); break; }
+    }
+  }, { passive: false });
+
+  dpad.addEventListener('touchcancel', e => { e.preventDefault(); reset(); }, { passive: false });
+})();
+
+// ═══════════════════════════════════════════════════════════════
+// SETTINGS — persistent, dirty-tracked, default-aware
+// ═══════════════════════════════════════════════════════════════
+const SETTINGS_KEY = 'virtualpad_settings';
+const DEFAULT_SETTINGS = { hapticEnabled: false, hapticMs: 15, showGrid: false };
+let savedSettings = { ...DEFAULT_SETTINGS };
+let draftSettings = { ...DEFAULT_SETTINGS };
+
+function loadSettings() {
+  try { const raw = localStorage.getItem(SETTINGS_KEY); if (raw) savedSettings = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }; } catch {}
+  draftSettings = { ...savedSettings };
+  renderSettings();
+  applyGridFromSaved();
 }
-setupStick('stickL','thumbL',false,10);
-setupStick('stickR','thumbR',true,11);
+
+function saveSettings() {
+  savedSettings = { ...draftSettings };
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(savedSettings));
+  renderSettings();
+}
+
+function revertSettings() {
+  draftSettings = { ...DEFAULT_SETTINGS };
+  renderSettings();
+}
+
+function isDirty() { return JSON.stringify(draftSettings) !== JSON.stringify(savedSettings); }
+function isDefault() { return JSON.stringify(draftSettings) === JSON.stringify(DEFAULT_SETTINGS); }
+
+const _hapticToggle = document.getElementById('hapticToggle');
+const _hapticMs = document.getElementById('hapticMs');
+const _hapticMsVal = document.getElementById('hapticMsVal');
+const _hapticMsRow = document.getElementById('hapticMsRow');
+const _gridToggle = document.getElementById('gridToggle');
+const _padGrid = document.getElementById('padGrid');
+const _btnSave = document.getElementById('btnSave');
+const _btnRevert = document.getElementById('btnRevert');
+const _dirtyBadge = document.getElementById('dirtyBadge');
+const _menuDirtyDot = document.getElementById('menuDirtyDot');
+
+function renderSettings() {
+  _hapticToggle.classList.toggle('on', draftSettings.hapticEnabled);
+  _hapticMsRow.style.display = draftSettings.hapticEnabled ? '' : 'none';
+  _hapticMs.value = draftSettings.hapticMs;
+  _hapticMsVal.textContent = draftSettings.hapticMs + 'ms';
+  _gridToggle.classList.toggle('on', draftSettings.showGrid);
+  _padGrid.classList.toggle('show-zones', draftSettings.showGrid);
+  const dirty = isDirty();
+  _btnSave.disabled = !dirty;
+  _btnRevert.disabled = isDefault();
+  _dirtyBadge.classList.toggle('visible', dirty);
+  _menuDirtyDot.classList.toggle('visible', dirty);
+}
+
+// Apply grid from saved settings immediately (before modal opens)
+function applyGridFromSaved() { _padGrid.classList.toggle('show-zones', savedSettings.showGrid); }
+
+_hapticToggle.addEventListener('click', () => { draftSettings.hapticEnabled = !draftSettings.hapticEnabled; renderSettings(); });
+_hapticMs.addEventListener('input', () => { draftSettings.hapticMs = parseInt(_hapticMs.value); _hapticMsVal.textContent = _hapticMs.value + 'ms'; const dirty = isDirty(); _btnSave.disabled = !dirty; _dirtyBadge.classList.toggle('visible', dirty); _menuDirtyDot.classList.toggle('visible', dirty); });
+_gridToggle.addEventListener('click', () => { draftSettings.showGrid = !draftSettings.showGrid; renderSettings(); });
+_btnSave.addEventListener('click', () => { saveSettings(); applyGridFromSaved(); });
+_btnRevert.addEventListener('click', () => { revertSettings(); });
+
+// ── Menu button — 2s long-press ──
+const _menuBtn = document.getElementById('menuBtn');
+const _modal = document.getElementById('settingsModal');
+const _closeBtn = document.getElementById('settingsClose');
+let _menuTimer = null;
+
+function openSettings() {
+  _modal.classList.add('open');
+  history.pushState({ settingsOpen: true }, '');
+}
+function closeSettings(fromPopstate) {
+  _modal.classList.remove('open');
+  if (!fromPopstate && history.state && history.state.settingsOpen) history.back();
+}
+
+_menuBtn.addEventListener('touchstart', e => {
+  e.preventDefault();
+  _menuBtn.classList.add('holding');
+  _menuTimer = setTimeout(() => { _menuBtn.classList.remove('holding'); openSettings(); }, 1000);
+}, { passive: false });
+_menuBtn.addEventListener('touchend', e => { e.preventDefault(); clearTimeout(_menuTimer); _menuBtn.classList.remove('holding'); }, { passive: false });
+_menuBtn.addEventListener('touchcancel', () => { clearTimeout(_menuTimer); _menuBtn.classList.remove('holding'); });
+_closeBtn.addEventListener('click', () => closeSettings(false));
+window.addEventListener('popstate', e => { if (_modal.classList.contains('open')) { closeSettings(true); } });
+
+loadSettings();
+
+// ── nipplejs sticks (with pin support) ──
+function setupNippleStick(zoneId, isRight, clickBit, pinId) {
+  const zone = document.getElementById(zoneId);
+  const pinEl = document.getElementById(pinId);
+  let mgr = null;
+  let pinned = false;
+  let pinnedPos = null;
+  let holdTimer = null;
+  let lastTap = 0;
+  let stickSize = 0;
+
+  function calcSize() { return Math.max(80, Math.min(Math.min(zone.offsetWidth, zone.offsetHeight) * 0.75, 140)); }
+
+  function bindEvents(m) {
+    m.on('start', () => {
+      const now = Date.now();
+      if (now - lastTap < 300) { setBtn(clickBit, true); setTimeout(() => setBtn(clickBit, false), 100); }
+      lastTap = now;
+      // Hold 2s to pin/unpin
+      holdTimer = setTimeout(() => {
+        if (!pinned) {
+          const nipple = zone.querySelector('.nipple');
+          if (nipple) {
+            const zr = zone.getBoundingClientRect();
+            const nr = nipple.getBoundingClientRect();
+            pinnedPos = { left: (nr.left - zr.left + nr.width/2) + 'px', top: (nr.top - zr.top + nr.height/2) + 'px' };
+            pinned = true;
+            recreate();
+            if (navigator.vibrate) navigator.vibrate([30, 40, 30]);
+          }
+        } else {
+          pinned = false;
+          pinnedPos = null;
+          recreate();
+          if (navigator.vibrate) navigator.vibrate([20, 30, 20]);
+        }
+      }, 2000);
+    });
+    m.on('move', (e, data) => {
+      // Cancel hold if finger moved significantly
+      if (holdTimer && data.distance > 15) { clearTimeout(holdTimer); holdTimer = null; }
+      const maxR = data.instance.options.size / 2;
+      const ratio = Math.min(1, data.distance / maxR);
+      const rad = data.angle.radian;
+      const dx = Math.cos(rad) * ratio;
+      const dy = -Math.sin(rad) * ratio;
+      const nx = Math.round(128 + dx * 127);
+      const ny = Math.round(128 + dy * 127);
+      if (isRight) { rx = nx; ry = ny; } else { lx = nx; ly = ny; }
+      flush();
+    });
+    m.on('end', () => {
+      clearTimeout(holdTimer); holdTimer = null;
+      if (isRight) { rx = 128; ry = 128; } else { lx = 128; ly = 128; }
+      flush();
+    });
+  }
+
+  function recreate() {
+    if (mgr) { mgr.destroy(); mgr = null; }
+    // Clear leftover nipple DOM
+    zone.querySelectorAll('.nipple').forEach(n => n.remove());
+    stickSize = calcSize();
+    const opts = {
+      zone: zone,
+      size: stickSize,
+      color: 'rgba(74,158,255,0.5)',
+      restOpacity: pinned ? 0.5 : 0.3,
+      fadeTime: 100,
+    };
+    if (pinned && pinnedPos) {
+      opts.mode = 'static';
+      opts.position = pinnedPos;
+    } else {
+      opts.mode = 'dynamic';
+    }
+    mgr = nipplejs.create(opts);
+    bindEvents(mgr);
+    // Add subtle pin icon inside the nipple back circle
+    if (pinned) {
+      const back = zone.querySelector('.nipple .back');
+      if (back) {
+        back.style.position = 'relative';
+        const pin = document.createElement('div');
+        pin.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:12px;opacity:0.25;pointer-events:none;';
+        pin.textContent = '\ud83d\udccc';
+        back.appendChild(pin);
+      }
+    }
+  }
+
+  recreate();
+}
+setupNippleStick('stickZoneL', false, 10, 'pinL');
+setupNippleStick('stickZoneR', true, 11, 'pinR');
 
 // ═══════════════════════════════════════════════════════════════
 // GAMEPAD API — forward physical controller connected to phone
@@ -1111,14 +1488,7 @@ function pollGamepad() {
       for (let i = 0; i < 17; i++) {
         document.querySelector('[data-btn="'+i+'"]')?.classList.toggle('pressed', !!(buttons & (1<<i)));
       }
-      // Stick thumbs
-      const tL = document.getElementById('thumbL'), tR = document.getElementById('thumbR');
-      const ldx = ((a[0]-128)/127*35).toFixed(1), ldy = ((a[1]-128)/127*35).toFixed(1);
-      const rdx = ((a[2]-128)/127*35).toFixed(1), rdy = ((a[3]-128)/127*35).toFixed(1);
-      tL.style.transform = 'translate(calc(-50% + '+ldx+'px),calc(-50% + '+ldy+'px))';
-      tR.style.transform = 'translate(calc(-50% + '+rdx+'px),calc(-50% + '+rdy+'px))';
-      tL.classList.toggle('active', a[0]!==128||a[1]!==128);
-      tR.classList.toggle('active', a[2]!==128||a[3]!==128);
+      // Stick values already set via nipplejs or gamepad — no DOM thumbs to update
       flush();
       gpPrevB = gb; gpPrevA = a;
     }
@@ -1131,7 +1501,7 @@ window.addEventListener('gamepaddisconnected', () => {});
 
 // Prevent zoom/scroll
 document.addEventListener('touchmove', e => e.preventDefault(), {passive:false});
-if (screen.orientation && screen.orientation.lock) screen.orientation.lock('landscape').catch(()=>{});
+// Portrait-first layout — no orientation lock
 // Screen Wake Lock (requires HTTPS secure context)
 let _wakeLock = null;
 async function requestWakeLock() {
@@ -1483,6 +1853,7 @@ const server = Bun.serve({
       }));
       return Response.json({ hw, slots: slots.map((s,i) => ({ slot: i+1, connected: !!s.ws, state: s.lastState ? Array.from(s.lastState) : null })) });
     }
+    if (path === "/nipplejs.min.js") return new Response(readFileSync(join(BASE_DIR, "nipplejs.min.js"), "utf-8"), { headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "public, max-age=86400" } });
     if (path === "/view") return new Response(VIEW_HTML, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" } });
     return new Response(CONTROLLER_HTML, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" } });
   },

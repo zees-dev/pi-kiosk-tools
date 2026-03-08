@@ -196,12 +196,39 @@ async function launchGame(): Promise<{ ok: boolean; error?: string }> {
       if (!existsSync(p)) mkdirSync(p, { recursive: true });
     }
 
-    // Ensure FPS counter on by default
+    // Ensure FPS counter on by default + multi-player controller ports
     const cfg = readConfig();
+    let cfgDirty = false;
     if (getCVar(cfg, "gStatsEnabled") === null) {
       setCVar(cfg, "gStatsEnabled", 1);
-      writeConfig(cfg);
+      cfgDirty = true;
     }
+    // Generate Port2-4 controller mappings if missing (clone Port1 SDL bindings for P1-P3)
+    const ctrl = cfg.CVars?.gControllers;
+    if (ctrl?.Port1 && !ctrl.Port2) {
+      for (let port = 2; port <= 4; port++) {
+        const p = port - 1;
+        const cloneReplace = (obj: any, from: string, to: string) =>
+          JSON.parse(JSON.stringify(obj).replaceAll(from, to));
+        ctrl["Port" + port] = cloneReplace(ctrl.Port1, "P0", "P" + p);
+        // Clone SDL axis/button/rumble mappings for this player
+        for (const section of ["AxisDirectionMappings", "ButtonMappings", "RumbleMappings"] as const) {
+          if (!ctrl[section]) continue;
+          const additions: Record<string, any> = {};
+          for (const [key, val] of Object.entries(ctrl[section])) {
+            if (key.startsWith("P0") && key.includes("SDL")) {
+              additions[key.replace("P0", "P" + p)] = cloneReplace(val, "P0", "P" + p);
+            } else if (key.startsWith("P0") && section === "RumbleMappings") {
+              additions[key.replace("P0", "P" + p)] = cloneReplace(val, "P0", "P" + p);
+            }
+          }
+          Object.assign(ctrl[section], additions);
+        }
+      }
+      cfgDirty = true;
+      console.log("[sk] Generated controller mappings for Port2-4");
+    }
+    if (cfgDirty) writeConfig(cfg);
 
     const cageArgs = ["-s", "-d", "--", "./Spaghettify"];
     const proc = Bun.spawn([SUDO, "-u", "kiosk", ENV_BIN,
