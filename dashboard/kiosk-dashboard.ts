@@ -627,6 +627,16 @@ const HTML = `<!DOCTYPE html>
   .status-dot.offline { background: #666; }
   .current-url { font-size: 12px; color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; cursor: pointer; }
   .current-url:active { color: #4a9eff; }
+
+  /* QR modal */
+  .qr-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 200; display: none; align-items: center; justify-content: center; }
+  .qr-overlay.open { display: flex; }
+  .qr-box { background: #1a1a1a; border: 1px solid #333; border-radius: 16px; padding: 24px; text-align: center; max-width: 320px; width: 90%; }
+  .qr-box canvas { border-radius: 8px; margin: 12px auto; display: block; }
+  .qr-url { font-size: 13px; color: #4a9eff; font-family: monospace; word-break: break-all; margin-bottom: 12px; }
+  .qr-label { font-size: 11px; color: #666; margin-bottom: 4px; }
+  .qr-close { padding: 8px 24px; background: #222; border: 1px solid #333; border-radius: 6px; color: #ccc; font-size: 12px; cursor: pointer; margin-top: 8px; }
+  .qr-close:hover { border-color: #4a9eff; color: #fff; }
   header h1 { cursor: pointer; user-select: none; transition: opacity 0.2s; }
   header h1:hover { opacity: 0.7; }
   header h1:active { opacity: 0.5; }
@@ -850,9 +860,18 @@ const HTML = `<!DOCTYPE html>
     <div><h1>📺 Kiosk Dashboard</h1><div class="hostname" id="hostnameText"></div></div>
     <div style="text-align:right">
       <div><span class="status-dot" id="statusDot"></span><span id="statusText">Checking...</span></div>
-      <div class="current-url" id="currentUrl"></div>
+      <div class="current-url" id="lanIp" title="Show QR code"></div>
     </div>
   </header>
+
+  <div class="qr-overlay" id="qrOverlay" onclick="if(event.target===this)closeQr()">
+    <div class="qr-box">
+      <div class="qr-label">Scan to connect</div>
+      <div class="qr-url" id="qrUrl"></div>
+      <canvas id="qrCanvas"></canvas>
+      <button class="qr-close" onclick="closeQr()">Close</button>
+    </div>
+  </div>
 
   <div class="status-bar" id="statusBar"></div>
   <div class="remote-btn" id="remoteBtn">🖱️ Remote Input</div>
@@ -1017,7 +1036,7 @@ const goBtn = $('goBtn');
 const toast = $('toast');
 const statusDot = $('statusDot');
 const statusText = $('statusText');
-const currentUrl = $('currentUrl');
+const lanIpEl = $('lanIp');
 
 let apps = [];
 let navHistory = [];
@@ -1604,7 +1623,7 @@ async function loadDiagnostics() {
     window._serviceMap = {};
     for (const s of svcs) window._serviceMap[s.name] = s;
   } catch {}
-  renderApps(currentUrl.textContent || '');
+  renderApps(lanIpEl.dataset.url || '');
 }
 
 let favourites = [];
@@ -1711,8 +1730,12 @@ async function loadStatus() {
     const data = await resp.json();
     statusDot.className = 'status-dot ' + (data.connected ? 'online' : 'offline');
     statusText.textContent = data.connected ? 'Connected' : 'Disconnected';
-    currentUrl.textContent = data.url || '';
     if (data.hostname) $('hostnameText').textContent = data.hostname;
+    if (data.ip && data.ip !== 'localhost') {
+      const dashUrl = 'http://' + data.ip + (location.port ? ':' + location.port : '');
+      lanIpEl.textContent = dashUrl;
+      lanIpEl.dataset.url = dashUrl;
+    }
     renderApps(data.url);
   } catch {
     statusDot.className = 'status-dot offline';
@@ -1720,21 +1743,37 @@ async function loadStatus() {
   }
 }
 
-// Click URL to copy to clipboard (with fallback for non-HTTPS)
-currentUrl.onclick = () => {
-  const url = currentUrl.textContent;
-  if (!url) return;
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(url).then(() => showToast('URL copied')).catch(() => copyFallback(url));
-  } else { copyFallback(url); }
-};
-function copyFallback(text) {
-  const ta = document.createElement('textarea');
-  ta.value = text; ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px';
-  document.body.appendChild(ta); ta.select();
-  try { document.execCommand('copy'); showToast('URL copied'); } catch { showToast('Copy failed', 'error'); }
-  document.body.removeChild(ta);
+// ── QR Code ──
+function showQr(url) {
+  $('qrUrl').textContent = url;
+  const canvas = $('qrCanvas');
+  const size = 200;
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size, size);
+  const img = new Image();
+  img.onload = () => { ctx.drawImage(img, 0, 0, size, size); };
+  img.onerror = () => {
+    // Fallback: generate simple text-based display
+    ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, 0, size, size);
+    ctx.fillStyle = '#888'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('Scan URL above', size/2, size/2 - 8);
+    ctx.fillText('to connect', size/2, size/2 + 12);
+  };
+  img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=' + size + 'x' + size + '&data=' + encodeURIComponent(url);
+  $('qrOverlay').classList.add('open');
 }
+function closeQr() { $('qrOverlay').classList.remove('open'); }
+
+lanIpEl.addEventListener('click', () => {
+  const url = lanIpEl.dataset.url;
+  if (url) showQr(url);
+});
+
+statusText.addEventListener('click', () => {
+  const url = lanIpEl.dataset.url;
+  if (url) showQr(url);
+});
 
 // ── Remote Input ──
 const MOVE = 0x01, CLICK = 0x02, SCROLL = 0x03, KEY = 0x04;
