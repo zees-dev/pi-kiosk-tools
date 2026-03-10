@@ -526,7 +526,7 @@ async function pairDevice(devicePath: string) {
     try { icon = (await props.Get("org.bluez.Device1", "Icon")).value; } catch {}
     if (icon === "input-gaming") {
       const { exec } = await import("child_process");
-      exec(`hcitool lp ${address} RSWITCH`, (err) => {
+      exec(`/run/wrappers/bin/sudo hcitool lp ${address} RSWITCH`, (err) => {
         if (!err) console.log(`  SNIFF disabled (low latency)`);
       });
     }
@@ -588,7 +588,7 @@ async function connectDevice(devicePath: string) {
       
       // Disable SNIFF mode for lower latency
       const { exec } = await import("child_process");
-      exec(`hcitool lp ${address} RSWITCH`, (err) => {
+      exec(`/run/wrappers/bin/sudo hcitool lp ${address} RSWITCH`, (err) => {
         if (err) console.log(`Could not disable SNIFF for ${address}: ${err.message}`);
         else console.log(`Disabled SNIFF mode for ${address} (low latency)`);
       });
@@ -1660,7 +1660,7 @@ async function startBtOptimizer() {
           if (!/Icon:\s*input-gaming/i.test(info)) continue;
           const policy = execSync(`hcitool lp ${addr} 2>/dev/null`, { timeout: 1000, encoding: "utf-8" });
           if (/SNIFF/.test(policy)) {
-            execCb(`hcitool lp ${addr} RSWITCH`, (err) => {
+            execCb(`/run/wrappers/bin/sudo hcitool lp ${addr} RSWITCH`, (err) => {
               if (!err) console.log(`[bt-opt] SNIFF disabled for ${addr}`);
             });
           }

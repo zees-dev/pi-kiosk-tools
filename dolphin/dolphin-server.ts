@@ -191,16 +191,15 @@ function restartKiosk(): void {
     execSync(`${SUDO} rm -rf /run/systemd/system/kiosk.service.d`, EXEC_OPTS(5000));
     execSync(`${SUDO} systemctl daemon-reload`, EXEC_OPTS(5000));
   } catch {}
-  // Always force-kill all kiosk processes first — Cage 0.2.1 leaves orphans after assertion crash
-  try { execSync(`${SUDO} killall -9 -u kiosk`, EXEC_OPTS(3000)); } catch {}
-  // Wait for seatd to release the DRM seat
-  try { execSync("sleep 2", EXEC_OPTS(5000)); } catch {}
+  // Use systemctl restart — let systemd handle the stop+start atomically.
+  // TimeoutStopSec=5s in the service ensures Cage gets SIGKILL quickly.
+  // Don't pkill manually — that races with hdmi-hotplug udev watcher.
   try { execSync(`${SUDO} systemctl reset-failed kiosk.service`, EXEC_OPTS(3000)); } catch {}
   try {
-    execSync(`${SUDO} systemctl start kiosk.service`, EXEC_OPTS(15000));
-    console.log("[kiosk] started successfully");
+    execSync(`${SUDO} systemctl restart kiosk.service`, EXEC_OPTS(20000));
+    console.log("[kiosk] restarted successfully");
   } catch (e: any) {
-    console.log(`[kiosk] failed to start: ${e.message}`);
+    console.log(`[kiosk] failed to restart: ${e.message}`);
   }
 }
 
@@ -1513,6 +1512,8 @@ const HTML = `<!DOCTYPE html>
   .profiles-grid { display: flex; flex-wrap: wrap; gap: 8px; }
   .profile-card { display: flex; align-items: center; gap: 8px; background: #1a1a1a; border: 1px solid #282828; border-radius: 8px; padding: 10px 12px; cursor: pointer; transition: all 0.15s; min-width: 0; flex: 1; min-width: 140px; max-width: 200px; }
   .profile-card:hover { border-color: #4a9eff; background: #1e1e1e; }
+  .profile-card.builtin { border-color: #333; background: #151515; }
+  .profile-card.builtin:hover { border-color: #4a9eff; background: #1a1a2a; }
   .profile-card .profile-name { flex: 1; font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .profile-card .profile-date { font-size: 10px; color: #555; }
   .profile-card .profile-delete { background: none; border: none; color: #444; cursor: pointer; font-size: 14px; padding: 0 2px; line-height: 1; flex-shrink: 0; }
@@ -1549,14 +1550,12 @@ const HTML = `<!DOCTYPE html>
     <div class="np-mode" id="npMode"></div>
     <button class="stop-btn" id="stopBtn" onclick="stopDolphin()">⏹ Stop & Return to Kiosk</button>
     <button class="stop-btn" id="restartBtn" onclick="restartDolphin()" style="background:#4a9eff; margin-top:8px">🔄 Restart Emulator</button>
-    <button class="stop-btn" id="forceKillBtn" onclick="forceKillKiosk()" style="background:#333; color:#aaa; margin-top:8px; font-size:12px; padding:8px 16px">🔌 Force Kill & Restart Kiosk</button>
   </div>
 
   <div id="idleContent">
     <div class="actions-bar">
       <button class="action-btn" onclick="refreshRoms()">🔄 Refresh ROMs</button>
       <button class="action-btn gui" onclick="launchUI()" title="Unavailable — no Xwayland on this kiosk" style="opacity:0.4;cursor:not-allowed">🖥️ Dolphin UI (N/A)</button>
-      <button class="action-btn" onclick="forceKillKiosk()" style="color:#aaa;font-size:12px" title="Force kill stuck kiosk and restart">🔌 Force Restart Kiosk</button>
     </div>
 
     <div id="romsContainer"></div>
@@ -1877,6 +1876,13 @@ async function loadProfilesData() {
 function renderProfiles() {
   const grid = $('profilesGrid');
   let html = '';
+  // Built-in profiles first
+  for (let i = 0; i < BUILTIN_PROFILES.length; i++) {
+    const p = BUILTIN_PROFILES[i];
+    html += '<div class="profile-card builtin" onclick="applyBuiltinProfile(' + i + ')" title="' + escHtml(p.desc) + '">' +
+      '<div><div class="profile-name">' + escHtml(p.name) + '</div><div class="profile-date">' + escHtml(p.desc) + '</div></div></div>';
+  }
+  // User profiles
   for (let i = 0; i < profiles.length; i++) {
     const p = profiles[i];
     const date = new Date(p.createdAt).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
@@ -1906,6 +1912,22 @@ async function saveProfile() {
     } else {
       showToast(data.error || 'Failed', 'error');
     }
+  } catch { showToast('Request failed', 'error'); }
+}
+
+async function applyBuiltinProfile(index) {
+  try {
+    const resp = await fetch('/api/profiles/apply-builtin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Applied: ' + BUILTIN_PROFILES[index].name);
+      loadProfilesData();
+      setTimeout(() => location.reload(), 500);
+    } else { showToast(data.error || 'Failed', 'error'); }
   } catch { showToast('Request failed', 'error'); }
 }
 
@@ -2019,25 +2041,7 @@ async function stopDolphin() {
   loadStatus();
 }
 
-async function forceKillKiosk() {
-  if (!confirm('Force kill all kiosk processes and restart?\\n\\nUse this if the screen is stuck on black.')) return;
-  const btn = $('forceKillBtn');
-  btn.disabled = true;
-  btn.textContent = '⏳ Killing...';
-  showToast('Force killing kiosk...');
-  try {
-    const resp = await fetch('/api/force-restart-kiosk', { method: 'POST' });
-    const data = await resp.json();
-    if (data.ok) {
-      showToast('Kiosk restarted');
-    } else {
-      showToast(data.error || 'Failed', 'error');
-    }
-  } catch { showToast('Request failed', 'error'); }
-  btn.disabled = false;
-  btn.textContent = '🔌 Force Kill & Restart Kiosk';
-  loadStatus();
-}
+
 
 async function restartDolphin() {
   const btn = $('restartBtn');
@@ -2244,6 +2248,41 @@ const DOLPHIN_DEFAULTS = {
   'dolphin.mmu': false, 'dolphin.fprf': false,
   'dolphin.audioStretching': true, 'dolphin.emulationSpeed': '1.0',
 };
+
+// Built-in profiles (not deletable)
+const BUILTIN_PROFILES = [
+  { name: '⚡ Performance', builtIn: true, desc: 'Max FPS, lower quality', settings: {
+    'dolphin.gfxBackend': 'Vulkan', 'gfx.efbScale': '1', 'gfx.msaa': '0x00000000',
+    'gfx.maxAnisotropy': '0', 'gfx.showFps': 'True', 'gfx.vsync': 'False',
+    'dolphin.cpuCore': '1', 'dolphin.fullscreen': 'True',
+    'dolphin.overclockEnable': 'True', 'dolphin.overclock': '2.0',
+    'gfx.shaderCompilationMode': '0', 'gfx.waitForShaders': 'False',
+    'gfx.fastDepthCalc': 'True', 'gfx.backendMultithreading': 'True',
+    'gfx.enablePixelLighting': 'False', 'gfx.efbAccessEnable': 'False',
+    'gfx.efbAccessDeferInvalidation': 'False', 'gfx.bboxEnable': 'False',
+    'dolphin.dspHle': 'True', 'dolphin.cpuThread': 'True',
+    'dolphin.skipIdle': 'True', 'dolphin.syncGpu': 'False',
+    'dolphin.syncGpuOnSkipIdle': 'True', 'dolphin.fastmem': 'True',
+    'dolphin.mmu': 'False', 'dolphin.fprf': 'False',
+    'dolphin.audioStretching': 'True', 'dolphin.emulationSpeed': '1.0',
+  }},
+
+  { name: '🎨 Quality', builtIn: true, desc: '4x res, 2x AA, 4x AF, pixel lighting', settings: {
+    'dolphin.gfxBackend': 'Vulkan', 'gfx.efbScale': '4', 'gfx.msaa': '0x00000002',
+    'gfx.maxAnisotropy': '4', 'gfx.showFps': 'True', 'gfx.vsync': 'False',
+    'dolphin.cpuCore': '1', 'dolphin.fullscreen': 'True',
+    'dolphin.overclockEnable': 'False', 'dolphin.overclock': '1.0',
+    'gfx.shaderCompilationMode': '0', 'gfx.waitForShaders': 'False',
+    'gfx.fastDepthCalc': 'True', 'gfx.backendMultithreading': 'True',
+    'gfx.enablePixelLighting': 'True', 'gfx.efbAccessEnable': 'False',
+    'gfx.efbAccessDeferInvalidation': 'False', 'gfx.bboxEnable': 'False',
+    'dolphin.dspHle': 'True', 'dolphin.cpuThread': 'True',
+    'dolphin.skipIdle': 'True', 'dolphin.syncGpu': 'False',
+    'dolphin.syncGpuOnSkipIdle': 'True', 'dolphin.fastmem': 'True',
+    'dolphin.mmu': 'False', 'dolphin.fprf': 'False',
+    'dolphin.audioStretching': 'True', 'dolphin.emulationSpeed': '1.0',
+  }},
+];
 
 function resetDefaults() {
   if (!confirm('Reset all settings to defaults? You will still need to Save to apply.')) return;
@@ -2608,15 +2647,6 @@ const server = serve({
       return Response.json(result);
     }
 
-    if (path === "/api/force-restart-kiosk" && req.method === "POST") {
-      // Kill Dolphin if running, then force-restart kiosk
-      if (dolphinProc) {
-        try { await stopDolphin(); } catch {}
-      }
-      restartKiosk();
-      return Response.json({ ok: true });
-    }
-
     // API: Get settings
     if (path === "/api/settings" && req.method === "GET") {
       return Response.json(await readSettings());
@@ -2710,6 +2740,43 @@ const server = serve({
           settings: await snapshotSettings(),
         });
         saveProfiles(profiles);
+        return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    // API: Apply a built-in profile
+    if (path === "/api/profiles/apply-builtin" && req.method === "POST") {
+      try {
+        const body = (await req.json()) as { index: number };
+        const builtins = [
+          { name: "Performance", settings: {
+            "gfx.efbScale": "1", "gfx.msaa": "0x00000000", "gfx.maxAnisotropy": "0",
+            "gfx.showFps": "True", "gfx.vsync": "False", "gfx.shaderCompilationMode": "0",
+            "gfx.fastDepthCalc": "True", "gfx.backendMultithreading": "True",
+            "gfx.enablePixelLighting": "False", "gfx.efbAccessEnable": "False",
+            "gfx.bboxEnable": "False", "dolphin.cpuThread": "True",
+            "dolphin.overclockEnable": "True", "dolphin.overclock": "2.0",
+            "dolphin.dspHle": "True", "dolphin.skipIdle": "True",
+            "dolphin.syncGpu": "False", "dolphin.audioStretching": "True",
+          }},
+          { name: "Quality", settings: {
+            "gfx.efbScale": "4", "gfx.msaa": "0x00000002", "gfx.maxAnisotropy": "4",
+            "gfx.showFps": "True", "gfx.vsync": "False", "gfx.shaderCompilationMode": "0",
+            "gfx.fastDepthCalc": "True", "gfx.backendMultithreading": "True",
+            "gfx.enablePixelLighting": "True", "gfx.efbAccessEnable": "False",
+            "gfx.bboxEnable": "False", "dolphin.cpuThread": "True",
+            "dolphin.overclockEnable": "False", "dolphin.overclock": "1.0",
+            "dolphin.dspHle": "True", "dolphin.skipIdle": "True",
+            "dolphin.syncGpu": "False", "dolphin.audioStretching": "True",
+          }},
+        ];
+        if (body.index < 0 || body.index >= builtins.length) {
+          return Response.json({ ok: false, error: "Invalid profile" }, { status: 400 });
+        }
+        savePrevSettings(await snapshotSettings());
+        applySnapshot(builtins[body.index].settings);
         return Response.json({ ok: true });
       } catch (e: any) {
         return Response.json({ ok: false, error: e.message }, { status: 500 });
