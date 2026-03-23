@@ -309,6 +309,45 @@ const PORT = 80;
 const CDP_PORT = 9222;
 const HISTORY_FILE = "./kiosk-history.json";
 const FAVOURITES_FILE = "./kiosk-favourites.json";
+const DISPLAY_CONFIG_FILE = import.meta.dir + "/display-config.json";
+const SUDO = "/run/wrappers/bin/sudo";
+
+const DEFAULT_RESOLUTION = "1280x720";
+const DEFAULT_HZ = "60";
+
+interface DisplayConfig {
+  resolution: string;
+  hz: string;
+}
+
+function loadDisplayConfig(): DisplayConfig {
+  try {
+    const raw = readFileSync(DISPLAY_CONFIG_FILE, "utf-8");
+    const cfg = JSON.parse(raw);
+    return { resolution: cfg.resolution || DEFAULT_RESOLUTION, hz: cfg.hz || DEFAULT_HZ };
+  } catch {
+    return { resolution: DEFAULT_RESOLUTION, hz: DEFAULT_HZ };
+  }
+}
+
+function saveDisplayConfig(resolution: string, hz: string): void {
+  try { writeFileSync(DISPLAY_CONFIG_FILE, JSON.stringify({ resolution, hz }, null, 2) + "\n"); } catch {}
+}
+
+function applyDisplayConfig(): boolean {
+  const cfg = loadDisplayConfig();
+  try {
+    execSync(
+      `${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 /run/current-system/sw/bin/wlr-randr --output HDMI-A-1 --mode ${cfg.resolution}@${cfg.hz}Hz`,
+      { timeout: 5000 }
+    );
+    console.log(`[display] Applied saved resolution: ${cfg.resolution}@${cfg.hz}Hz`);
+    return true;
+  } catch (e: any) {
+    console.error(`[display] Failed to apply resolution: ${e.message}`);
+    return false;
+  }
+}
 
 interface Favourite {
   url: string;
@@ -3232,10 +3271,25 @@ const server = serve({
           `${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 /run/current-system/sw/bin/wlr-randr --output HDMI-A-1 ${args.join(" ")}`,
           { timeout: 5000 }
         );
+        // Persist resolution (not custom-mode or transform-only changes)
+        if (body.resolution && !body.custom) {
+          saveDisplayConfig(body.resolution, body.hz || DEFAULT_HZ);
+        }
         return Response.json({ ok: true });
       } catch (e: any) {
         return Response.json({ ok: false, error: e.message }, { status: 500 });
       }
+    }
+
+    // Apply saved display config (called by hdmi-hotplug / kiosk startup)
+    if (path === "/api/display/apply-saved" && req.method === "POST") {
+      const ok = applyDisplayConfig();
+      return Response.json({ ok, config: loadDisplayConfig() });
+    }
+
+    // Get current display config
+    if (path === "/api/display/config" && req.method === "GET") {
+      return Response.json(loadDisplayConfig());
     }
 
     if (path === "/api/display/power" && req.method === "POST") {
@@ -3341,3 +3395,9 @@ const server = serve({
 });
 
 console.log(`Kiosk Dashboard running on http://localhost:${PORT}`);
+
+// Apply saved display config on startup (delayed to let kiosk/Cage settle)
+setTimeout(() => {
+  console.log("[display] Applying saved display config on startup...");
+  applyDisplayConfig();
+}, 8000);
