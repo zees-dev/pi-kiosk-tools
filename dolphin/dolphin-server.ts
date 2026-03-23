@@ -215,6 +215,18 @@ function ensureDirs(): void {
 
 ensureDirs();
 
+// ── RetroAchievements (from env vars) ───────────────────────────────────────
+{
+  const raUser = process.env.RA_USERNAME;
+  const raToken = process.env.RA_TOKEN;
+  if (raUser && raToken) {
+    const raIni = join(CONFIG_DIR, "RetroAchievements.ini");
+    const content = `[Achievements]\nEnabled = True\nUsername = ${raUser}\nApiToken = ${raToken}\nAchievementsEnabled = True\nLeaderboardsEnabled = True\nRichPresenceEnabled = True\nHardcoreEnabled = False\nBadgesEnabled = True\nUnofficialEnabled = False\nEncoreEnabled = False\nProgressEnabled = True\n`;
+    writeFileSync(raIni, content);
+    console.log(`[ra] RetroAchievements enabled for ${raUser}`);
+  }
+}
+
 // ── ROM Scanner ─────────────────────────────────────────────────────────────
 
 interface RomEntry {

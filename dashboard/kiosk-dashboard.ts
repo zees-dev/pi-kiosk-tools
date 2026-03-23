@@ -725,6 +725,9 @@ const HTML = `<!DOCTYPE html>
   .av-apply-btn { background: #4a9eff; color: #fff; border: none; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; -webkit-tap-highlight-color: transparent; transition: opacity 0.15s; }
   .av-apply-btn:active { background: #3a8eef; }
   .av-apply-btn:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
+  .av-test-btn { width: 100%; padding: 10px; background: rgba(74,158,255,0.12); border: 1px solid rgba(74,158,255,0.25); border-radius: 8px; color: #4a9eff; font-size: 13px; font-weight: 600; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: all 0.15s; }
+  .av-test-btn:active { background: rgba(74,158,255,0.25); }
+  .av-test-btn.playing { background: rgba(76,175,80,0.15); border-color: rgba(76,175,80,0.3); color: #4CAF50; }
   .av-disabled { opacity: 0.4; pointer-events: none; }
   .av-unsupported { font-size: 10px; color: #666; font-weight: 400; margin-left: 4px; }
   .av-label { font-size: 13px; color: #aaa; margin-bottom: 8px; }
@@ -936,6 +939,9 @@ const HTML = `<!DOCTYPE html>
         <span class="av-label">Output</span>
         <select id="avSinkSelect" onchange="setSink()" class="ri-select"></select>
       </div>
+    </div>
+    <div class="av-section">
+      <button class="av-test-btn" id="avTestSoundBtn" onclick="testSound()">🔊 Test Sound</button>
     </div>
 
     <div class="av-group-label">Display</div>
@@ -1978,6 +1984,19 @@ function setSink() {
     });
 }
 
+async function testSound() {
+  const btn = $('avTestSoundBtn');
+  btn.textContent = '🔊 Playing...';
+  btn.classList.add('playing');
+  try {
+    const r = await fetch('/api/audio/test', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) showToast('Test sound played');
+    else showToast(d.error || 'Failed', 'error');
+  } catch { showToast('Failed to play test sound', 'error'); }
+  setTimeout(() => { btn.textContent = '🔊 Test Sound'; btn.classList.remove('playing'); }, 1500);
+}
+
 function renderRefreshRates(res, currentHz) {
   const sel = $('avRefreshSelect');
   sel.innerHTML = '';
@@ -2969,6 +2988,19 @@ const server = serve({
       const body = await req.json() as { id: number };
       wpctl(`set-default ${body.id}`);
       return Response.json({ ok: true });
+    }
+
+    if (path === "/api/audio/test" && req.method === "POST") {
+      try {
+        // Use speaker-test to play a 1-second sine tone as kiosk user via PipeWire
+        execSync(
+          `/run/current-system/sw/bin/timeout 1 ${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 /run/current-system/sw/bin/speaker-test -t sine -f 440 -l 1 2>/dev/null || true`,
+          { timeout: 5000, encoding: "utf-8" }
+        );
+        return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message?.slice(0, 200) }, { status: 500 });
+      }
     }
 
     if (path === "/api/display" && req.method === "GET") {
