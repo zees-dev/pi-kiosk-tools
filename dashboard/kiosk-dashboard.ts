@@ -391,7 +391,7 @@ function getApps(): App[] {
 
   apps.push(
     // Apps
-    { id: "virtualpad", name: "Virtual Pad", icon: "🎮", url: `https://${ip}:3461/view`, description: "Web-based game controller", section: "apps" },
+    { id: "virtualpad", name: "Virtual Pad", icon: "🎮", url: `https://${ip}:3461/view`, description: "Web-based game controller", diagnosticsUrl: `/api/virtualpad-controllers`, section: "apps" },
     { id: "wifi", name: "WiFi Manager", icon: "📶", url: `http://${ip}:3457`, description: "Network settings", diagnosticsUrl: `http://${ip}:3457/api/diagnostics`, section: "apps" },
     { id: "bluetooth", name: "Bluetooth", icon: "🔵", url: `http://${ip}:3456`, description: "Controller pairing", diagnosticsUrl: `http://${ip}:3456/api/diagnostics`, section: "apps" },
     { id: "vnc", name: "VNC", icon: "📺", url: `http://${ip}:6080/vnc.html?host=${ip}&port=6080&autoconnect=true&resize=scale&quality=6&show_dot=true&view_clip=true`, description: "View kiosk display remotely", external: true, section: "apps" },
@@ -632,11 +632,32 @@ const HTML = `<!DOCTYPE html>
   .qr-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 200; display: none; align-items: center; justify-content: center; }
   .qr-overlay.open { display: flex; }
   .qr-box { background: #1a1a1a; border: 1px solid #333; border-radius: 16px; padding: 24px; text-align: center; max-width: 320px; width: 90%; }
-  .qr-box canvas { border-radius: 8px; margin: 12px auto; display: block; }
+  .qr-box #qrCanvas { border-radius: 8px; margin: 12px auto; display: flex; justify-content: center; }
+  .qr-box #qrCanvas img, .qr-box #qrCanvas canvas { border-radius: 8px; }
   .qr-url { font-size: 13px; color: #4a9eff; font-family: monospace; word-break: break-all; margin-bottom: 12px; }
   .qr-label { font-size: 11px; color: #666; margin-bottom: 4px; }
   .qr-close { padding: 8px 24px; background: #222; border: 1px solid #333; border-radius: 6px; color: #ccc; font-size: 12px; cursor: pointer; margin-top: 8px; }
   .qr-close:hover { border-color: #4a9eff; color: #fff; }
+
+  /* Network + Controllers subtitle */
+  .header-meta { margin-top: 2px; }
+  .header-network { font-size: 10px; color: #444; display: flex; align-items: center; gap: 4px; }
+  .header-network .net-icon { font-size: 10px; }
+  .header-network .net-name { color: #555; }
+  .header-controllers { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+  .ctrl-pill { font-size: 9px; color: #555; background: rgba(255,255,255,0.04); border: 1px solid #222; border-radius: 10px; padding: 1px 7px; white-space: nowrap; display: inline-flex; align-items: center; gap: 3px; }
+  .ctrl-pill .ctrl-dot { width: 5px; height: 5px; border-radius: 50%; background: #4CAF50; flex-shrink: 0; }
+  .ctrl-pill .ctrl-dot.disconnected { background: #555; }
+
+  /* Desktop QR code */
+  .desktop-qr { display: none; margin-bottom: 20px; text-align: center; }
+  .desktop-qr #desktopQrCode { display: inline-block; background: #fff; padding: 8px; border-radius: 8px; }
+  .desktop-qr #desktopQrCode img, .desktop-qr #desktopQrCode canvas { display: block; border-radius: 4px; }
+  .desktop-qr .qr-label { font-size: 10px; color: #444; margin-top: 4px; }
+  @media (min-width: 601px) and (pointer: fine) {
+    .desktop-qr { display: block; }
+  }
+
   header h1 { cursor: pointer; user-select: none; transition: opacity 0.2s; }
   header h1:hover { opacity: 0.7; }
   header h1:active { opacity: 0.5; }
@@ -856,22 +877,35 @@ const HTML = `<!DOCTYPE html>
   .reboot-btn:hover { border-color: #f44336; color: #f44336; background: rgba(244,67,54,0.08); }
   .reboot-btn:active { background: rgba(244,67,54,0.15); }
 </style>
+<script src="/qrcode.min.js"></script>
 </head>
 <body>
 <div class="container">
   <header>
-    <div><h1>📺 Kiosk Dashboard</h1><div class="hostname" id="hostnameText"></div></div>
+    <div>
+      <h1>📺 Kiosk Dashboard</h1>
+      <div class="hostname" id="hostnameText"></div>
+      <div class="header-meta">
+        <div class="header-network" id="headerNetwork"></div>
+        <div class="header-controllers" id="headerControllers"></div>
+      </div>
+    </div>
     <div style="text-align:right">
       <div><span class="status-dot" id="statusDot"></span><span id="statusText">Checking...</span></div>
       <div class="current-url" id="lanIp" title="Show QR code"></div>
     </div>
   </header>
 
+  <div class="desktop-qr" id="desktopQr">
+    <div id="desktopQrCode"></div>
+    <div class="qr-label">Scan to open dashboard</div>
+  </div>
+
   <div class="qr-overlay" id="qrOverlay" onclick="if(event.target===this)closeQr()">
     <div class="qr-box">
       <div class="qr-label">Scan to connect</div>
       <div class="qr-url" id="qrUrl"></div>
-      <canvas id="qrCanvas"></canvas>
+      <div id="qrCanvas"></div>
       <button class="qr-close" onclick="closeQr()">Close</button>
     </div>
   </div>
@@ -1506,15 +1540,18 @@ function formatDiag(app, diag) {
   if (diag.error) return '<div class="diag"><div class="diag-line diag-warn">⚠ error</div></div>';
 
   if (app.id === 'bluetooth') {
-    const power = diag.powered ? '<span class="diag-ok">On</span>' : '<span class="diag-off">Off</span>';
+    const on = diag.powered;
+    const cls = on ? 'diag-ok' : 'diag-off';
+    const power = '<span class="' + cls + '">' + (on ? 'On' : 'Off') + '</span>';
     const devs = (diag.connectedDevices || []);
-    const devStr = devs.length ? devs.map(d => d.name).join(', ') : '<span class="diag-off">No devices</span>';
+    const devStr = devs.length ? '<span class="' + cls + '">' + devs.map(d => d.name).join(', ') + '</span>' : '<span class="diag-off">No devices</span>';
     return '<div class="diag"><div class="diag-line">' + power + '</div><div class="diag-line">' + devStr + '</div></div>';
   }
   if (app.id === 'wifi') {
-    const radio = diag.radioEnabled ? '<span class="diag-ok">On</span>' : '<span class="diag-off">Off</span>';
-    const conn = diag.connection === 'No connection'
-      ? '<span class="diag-warn">No connection</span>'
+    const on = diag.radioEnabled;
+    const radio = '<span class="' + (on ? 'diag-ok' : 'diag-off') + '">' + (on ? 'On' : 'Off') + '</span>';
+    const conn = !on || diag.connection === 'No connection'
+      ? '<span class="' + (on ? 'diag-warn' : 'diag-off') + '">' + (on ? 'No connection' : 'Radio off') + '</span>'
       : '<span class="diag-ok">' + escHtml(diag.connection) + (diag.signal ? ' (' + diag.signal + '%)' : '') + '</span>';
     return '<div class="diag"><div class="diag-line">' + radio + '</div><div class="diag-line">' + conn + '</div></div>';
   }
@@ -1523,6 +1560,30 @@ function formatDiag(app, diag) {
     const ctrls = (diag.controllers || []);
     const ctrlStr = ctrls.length ? ctrls.join(', ') : '<span class="diag-off">No controllers</span>';
     return '<div class="diag"><div class="diag-line">' + ps4 + '</div><div class="diag-line">' + ctrlStr + '</div></div>';
+  }
+  if (app.id === 'virtualpad') {
+    const pills = [];
+    // BT paired controllers
+    const btDiag = diagCache['bluetooth'];
+    if (btDiag) {
+      const btDevices = btDiag.connectedDevices || [];
+      // Also show paired-but-disconnected from full BT device list
+      const allBt = window._btDevices || [];
+      const paired = allBt.length ? allBt.filter(d => d.paired) : btDevices.map(d => ({ ...d, connected: true }));
+      for (const d of paired) {
+        const dot = d.connected ? 'ctrl-dot' : 'ctrl-dot disconnected';
+        const name = (d.name || '').replace(/^Wireless Controller$/, 'DS4');
+        if (name) pills.push('<span class="ctrl-pill"><span class="' + dot + '"></span>🎮 ' + name + '</span>');
+      }
+    }
+    // Hardware controllers (evdev, non-BT)
+    const hw = diag.hw || [];
+    for (const h of hw) pills.push('<span class="ctrl-pill"><span class="ctrl-dot"></span>🕹️ ' + h.name + '</span>');
+    // Virtual pad controllers
+    const players = diag.players || [];
+    for (const p of players) pills.push('<span class="ctrl-pill"><span class="ctrl-dot"></span>📱 ' + (p.label || 'P' + p.slot) + '</span>');
+    if (!pills.length) return '<div class="diag"><div class="diag-line diag-off">No controllers</div></div>';
+    return '<div class="diag"><div style="display:flex;flex-wrap:wrap;gap:3px;justify-content:flex-end">' + pills.join('') + '</div></div>';
   }
   if (app.id === 'vnc') {
     if (!diag.active) return '<div class="diag"><div class="diag-line diag-off">Service disabled</div></div>';
@@ -1617,6 +1678,12 @@ async function loadDiagnostics() {
       diagCache[app.id] = await resp.json();
     } catch { diagCache[app.id] = null; }
   }
+  // BT full device list for controller pills
+  try {
+    const resp = await fetch('http://' + location.hostname + ':3456/api/devices', { signal: AbortSignal.timeout(2000) });
+    const data = await resp.json();
+    window._btDevices = data.devices || [];
+  } catch { window._btDevices = window._btDevices || []; }
   // VNC service status
   try {
     const resp = await fetch('/api/vnc', { signal: AbortSignal.timeout(3000) });
@@ -1741,6 +1808,12 @@ async function loadStatus() {
       const dashUrl = 'http://' + data.ip + (location.port ? ':' + location.port : '');
       lanIpEl.textContent = dashUrl;
       lanIpEl.dataset.url = dashUrl;
+      // Update desktop QR (local generation)
+      const qrEl = $('desktopQrCode');
+      if (qrEl && !qrEl.dataset.set && window.QRCode) {
+        new window.QRCode(qrEl, { text: dashUrl, width: 140, height: 140, colorDark: '#000', colorLight: '#FFF', correctLevel: window.QRCode.CorrectLevel.M });
+        qrEl.dataset.set = '1';
+      }
     }
     renderApps(data.url);
   } catch {
@@ -1749,24 +1822,75 @@ async function loadStatus() {
   }
 }
 
+// ── Network & Controllers ──
+async function loadNetworkInfo() {
+  const el = $('headerNetwork');
+  if (!el) return;
+  try {
+    const resp = await fetch('http://' + location.hostname + ':3457/api/status', { signal: AbortSignal.timeout(2000) });
+    const data = await resp.json();
+    if (data.wireless && data.wireless.state === 'connected') {
+      el.innerHTML = '<span class="net-icon">📶</span><span class="net-name">' + data.wireless.connection + '</span>';
+    } else if (data.ethernet && data.ethernet.state === 'connected') {
+      el.innerHTML = '<span class="net-icon">🔌</span><span class="net-name">Ethernet</span>';
+    } else {
+      el.innerHTML = '<span class="net-icon">⚠️</span><span class="net-name" style="color:#666">No network</span>';
+    }
+  } catch {
+    el.innerHTML = '';
+  }
+}
+
+async function loadControllers() {
+  const el = $('headerControllers');
+  if (!el) return;
+  let pills = [];
+  // BT paired devices
+  try {
+    const resp = await fetch('http://' + location.hostname + ':3456/api/devices', { signal: AbortSignal.timeout(2000) });
+    const data = await resp.json();
+    for (const d of (data.devices || []).filter(d => d.paired)) {
+      const dot = d.connected ? 'ctrl-dot' : 'ctrl-dot disconnected';
+      const name = (d.name || d.address).replace(/^Wireless Controller$/, 'DS4');
+      pills.push('<span class="ctrl-pill"><span class="' + dot + '"></span>🎮 ' + name + '</span>');
+    }
+  } catch {}
+  // Virtual pad controllers (via proxy to avoid mixed-content)
+  try {
+    const resp = await fetch('/api/virtualpad-controllers', { signal: AbortSignal.timeout(2000) });
+    const data = await resp.json();
+    for (const p of (data.players || [])) {
+      const label = p.label || ('P' + p.slot);
+      pills.push('<span class="ctrl-pill"><span class="ctrl-dot"></span>📱 ' + label + '</span>');
+    }
+  } catch {}
+  el.innerHTML = pills.length ? pills.join('') : '';
+}
+
+// Refresh network + controllers periodically
+loadNetworkInfo(); loadControllers();
+setInterval(loadNetworkInfo, 15000);
+setInterval(loadControllers, 5000);
+// Fast-poll virtual pad controllers for card diag
+setInterval(async () => {
+  const vp = apps.find(a => a.id === 'virtualpad');
+  if (!vp || !vp.diagnosticsUrl) return;
+  try {
+    const resp = await fetch(vp.diagnosticsUrl, { signal: AbortSignal.timeout(2000) });
+    diagCache['virtualpad'] = await resp.json();
+    renderApps(lanIpEl.dataset.url || '');
+  } catch {}
+}, 5000);
+
 // ── QR Code ──
 function showQr(url) {
   $('qrUrl').textContent = url;
   const canvas = $('qrCanvas');
-  const size = 200;
-  canvas.width = size; canvas.height = size;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size, size);
-  const img = new Image();
-  img.onload = () => { ctx.drawImage(img, 0, 0, size, size); };
-  img.onerror = () => {
-    // Fallback: generate simple text-based display
-    ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, 0, size, size);
-    ctx.fillStyle = '#888'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText('Scan URL above', size/2, size/2 - 8);
-    ctx.fillText('to connect', size/2, size/2 + 12);
-  };
-  img.src = 'https://api.qrserver.com/v1/create-qr-code/?size=' + size + 'x' + size + '&data=' + encodeURIComponent(url);
+  canvas.innerHTML = '';
+  canvas.style.width = '200px'; canvas.style.height = '200px';
+  if (window.QRCode) {
+    new window.QRCode(canvas, { text: url, width: 200, height: 200, colorDark: '#000', colorLight: '#FFF', correctLevel: window.QRCode.CorrectLevel.M });
+  }
   $('qrOverlay').classList.add('open');
 }
 function closeQr() { $('qrOverlay').classList.remove('open'); }
@@ -2712,6 +2836,22 @@ const server = serve({
     // Dashboard page
     if (path === "/" || path === "/index.html") {
       return new Response(HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+
+    // Proxy virtual-pad controllers (avoids mixed-content / self-signed cert issues)
+    if (path === "/api/virtualpad-controllers") {
+      try {
+        const resp = await fetch("https://127.0.0.1:3461/api/controllers", { tls: { rejectUnauthorized: false }, signal: AbortSignal.timeout(2000) } as any);
+        const data = await resp.json();
+        return Response.json(data);
+      } catch {
+        return Response.json({ players: [], hw: [] });
+      }
+    }
+
+    if (path === "/qrcode.min.js") {
+      const f = Bun.file(import.meta.dir + "/qrcode.min.js");
+      return new Response(f, { headers: { "Content-Type": "application/javascript", "Cache-Control": "public, max-age=86400" } });
     }
 
     // API: list apps

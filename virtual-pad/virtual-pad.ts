@@ -1964,6 +1964,15 @@ const server = Bun.serve({
     }
 
     if (path === "/health") return Response.json({ status: "ok" });
+    if (path === "/api/controllers") {
+      const players = slots.map((s, i) => ({
+        slot: i + 1, connected: !!s.ws, label: s.label, vendor: s.vendorId,
+      })).filter(p => p.connected);
+      const hw = Array.from(hwControllers.values()).map(h => ({
+        name: h.name, type: h.type, vendor: h.vendorId,
+      }));
+      return Response.json({ players, hw });
+    }
     if (path === "/api/hw-forwarding") {
       if (req.method === "GET") {
         return Response.json({
