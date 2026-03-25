@@ -310,6 +310,7 @@ const CDP_PORT = 9222;
 const HISTORY_FILE = "./kiosk-history.json";
 const FAVOURITES_FILE = "./kiosk-favourites.json";
 const DISPLAY_CONFIG_FILE = import.meta.dir + "/display-config.json";
+const GAMEPAD_CONFIG_FILE = import.meta.dir + "/gamepad-config.json";
 const SUDO = "/run/wrappers/bin/sudo";
 
 const DEFAULT_RESOLUTION = "1280x720";
@@ -618,7 +619,8 @@ async function navigateKiosk(url: string, recordHistory = true): Promise<{ ok: b
       setTimeout(() => reject(new Error("WebSocket timeout")), 3000);
     });
 
-    await cdpSend(ws, "Page.navigate", { url });
+    // Use window.location instead of Page.navigate to stay in --app fullscreen mode
+    await cdpSend(ws, "Runtime.evaluate", { expression: `window.location.href = ${JSON.stringify(url)}` });
     ws.close();
 
     if (recordHistory) {
@@ -738,6 +740,24 @@ const HTML = `<!DOCTYPE html>
   .svc-item { font-size: 12px; color: #aaa; display: inline-flex; align-items: center; }
 
   /* Remote input button */
+  /* Gamepad panel */
+  .gp-btn { background: #222; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 9px; color: #555; transition: background 0.1s, color 0.1s; }
+  .gp-btn.active { background: #4a9eff; color: #fff; }
+  .gp-face { border-radius: 50%; }
+  .gp-sm { font-size: 7px; padding: 2px 6px; border-radius: 3px; }
+  .gp-stick-box { width: 48px; height: 48px; background: #111; border: 1px solid #333; border-radius: 8px; position: relative; }
+  .gp-stick-dot { width: 12px; height: 12px; border-radius: 50%; background: #4a9eff; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); transition: none; }
+  .gp-trigger-bar { height: 6px; background: #222; border-radius: 3px; overflow: hidden; }
+  .gp-trigger-fill { height: 100%; background: #4a9eff; width: 0%; transition: width 0.05s; border-radius: 3px; }
+  .gp-setting { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+  .gp-setting > span:first-child { font-size: 12px; color: #aaa; min-width: 90px; }
+  .gp-setting .av-slider { flex: 1; }
+  .gp-val { font-size: 11px; color: #4a9eff; min-width: 50px; text-align: right; font-variant-numeric: tabular-nums; }
+
+  .remote-split { display: flex; gap: 0; margin-bottom: 16px; }
+  .remote-split .remote-half { flex: 1; margin-bottom: 0; }
+  .remote-split .remote-half:first-child { border-radius: 8px 0 0 8px; border-right: none; }
+  .remote-split .remote-half:last-child { border-radius: 0 8px 8px 0; }
   .remote-btn { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; background: #1a1a1a; border: 1px solid #282828; border-radius: 8px; padding: 10px; margin-bottom: 16px; color: #888; font-size: 13px; cursor: pointer; transition: all 0.15s; }
   .remote-btn:hover { border-color: #444; color: #ccc; background: #1e1e1e; }
   .remote-btn:active { background: #222; }
@@ -911,12 +931,16 @@ const HTML = `<!DOCTYPE html>
   .toast.success { background: #2e7d32; }
 
   /* Reboot button */
-  .reboot-bar { display: flex; justify-content: flex-end; margin-top: 24px; padding: 16px 0; border-top: 1px solid #1a1a1a; }
+  .reboot-bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; padding: 16px 0; border-top: 1px solid #1a1a1a; }
   .reboot-btn { background: none; border: 1px solid #333; color: #666; padding: 8px 16px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.2s; }
-  .reboot-btn:hover { border-color: #f44336; color: #f44336; background: rgba(244,67,54,0.08); }
-  .reboot-btn:active { background: rgba(244,67,54,0.15); }
+  .reboot-btn:hover { border-color: #4a9eff; color: #4a9eff; background: rgba(74,158,255,0.08); }
+  .reboot-btn:active { background: rgba(74,158,255,0.15); }
+  .reboot-btn.danger { border-color: #f44336; color: #f44336; }
+  .reboot-btn.danger:hover { background: rgba(244,67,54,0.12); border-color: #ff5252; color: #ff5252; }
+  .reboot-btn.danger:active { background: rgba(244,67,54,0.2); }
 </style>
 <script src="/qrcode.min.js"></script>
+<script src="/gamepad-nav.js"></script>
 </head>
 <body>
 <div class="container">
@@ -950,7 +974,10 @@ const HTML = `<!DOCTYPE html>
   </div>
 
   <div class="status-bar" id="statusBar"></div>
-  <div class="remote-btn" id="remoteBtn">🖱️ Remote Input</div>
+  <div class="remote-split">
+    <div class="remote-btn remote-half" id="remoteBtn">🖱️ Remote Input</div>
+    <div class="remote-btn remote-half" id="gamepadBtn">🎮 Gamepad</div>
+  </div>
   <div class="remote-btn" id="avBtn">🔊 Display & Audio</div>
 
 
@@ -971,7 +998,10 @@ const HTML = `<!DOCTYPE html>
   <div class="section-title">Recent</div>
   <ul class="history-list" id="historyList"></ul>
 
-  <div class="reboot-bar"><button class="reboot-btn" id="rebootBtn">↻ Reboot System</button></div>
+  <div class="reboot-bar">
+    <button class="reboot-btn" id="restartKioskBtn">↻ Restart Kiosk</button>
+    <button class="reboot-btn danger" id="rebootBtn">⏻ Reboot System</button>
+  </div>
 </div>
 <div class="toast" id="toast"></div>
 <div class="modal-overlay" id="sysModal">
@@ -1085,6 +1115,82 @@ const HTML = `<!DOCTYPE html>
         <input type="range" id="avBrightnessSlider" min="0" max="100" value="100" class="av-slider" disabled>
         <span class="av-vol-val" id="avBrightnessVal">—</span>
       </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="gpModal">
+  <div class="modal" style="max-width:420px">
+    <button class="modal-close" id="gpClose">✕</button>
+    <h2>🎮 Gamepad Settings</h2>
+
+    <div class="av-group-label">Controller</div>
+    <div class="av-section">
+      <div id="gpControllerName" style="font-size:12px;color:#666;margin-bottom:8px">No controller detected</div>
+      <div id="gpVisualizer" style="position:relative;height:160px;background:#0a0a0a;border:1px solid #282828;border-radius:8px;overflow:hidden">
+        <div id="gpVizContent" style="display:flex;align-items:center;justify-content:center;height:100%;gap:20px;padding:12px">
+          <!-- Left side: d-pad + left stick -->
+          <div style="display:flex;flex-direction:column;align-items:center;gap:8px">
+            <div id="gpDpad" style="display:grid;grid-template:24px 24px 24px/24px 24px 24px;gap:2px">
+              <div></div><div class="gp-btn" data-b="12">▲</div><div></div>
+              <div class="gp-btn" data-b="14">◀</div><div></div><div class="gp-btn" data-b="15">▶</div>
+              <div></div><div class="gp-btn" data-b="13">▼</div><div></div>
+            </div>
+            <div class="gp-stick-box" id="gpLeftStick"><div class="gp-stick-dot" id="gpLDot"></div></div>
+            <div style="display:flex;gap:4px">
+              <div class="gp-btn gp-sm" data-b="8">SEL</div>
+              <div class="gp-btn gp-sm" data-b="9">STR</div>
+            </div>
+          </div>
+          <!-- Center: triggers + bumpers -->
+          <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+            <div style="display:flex;gap:16px;width:100%">
+              <div style="flex:1"><div style="font-size:8px;color:#444;text-align:center">L1</div><div class="gp-trigger-bar"><div class="gp-trigger-fill" id="gpL1"></div></div></div>
+              <div style="flex:1"><div style="font-size:8px;color:#444;text-align:center">R1</div><div class="gp-trigger-bar"><div class="gp-trigger-fill" id="gpR1"></div></div></div>
+            </div>
+            <div style="display:flex;gap:16px;width:100%">
+              <div style="flex:1"><div style="font-size:8px;color:#444;text-align:center">L2</div><div class="gp-trigger-bar"><div class="gp-trigger-fill" id="gpL2"></div></div></div>
+              <div style="flex:1"><div style="font-size:8px;color:#444;text-align:center">R2</div><div class="gp-trigger-bar"><div class="gp-trigger-fill" id="gpR2"></div></div></div>
+            </div>
+            <!-- Face buttons -->
+            <div style="display:grid;grid-template:26px 26px 26px/26px 26px 26px;gap:2px;margin-top:4px">
+              <div></div><div class="gp-btn gp-face" data-b="3" style="color:#fd3">Y</div><div></div>
+              <div class="gp-btn gp-face" data-b="2" style="color:#48f">X</div><div></div><div class="gp-btn gp-face" data-b="1" style="color:#f44">B</div>
+              <div></div><div class="gp-btn gp-face" data-b="0" style="color:#4c5">A</div><div></div>
+            </div>
+          </div>
+          <!-- Right side: right stick -->
+          <div style="display:flex;flex-direction:column;align-items:center;gap:8px">
+            <div class="gp-stick-box" id="gpRightStick"><div class="gp-stick-dot" id="gpRDot"></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="av-group-label">Cursor</div>
+    <div class="av-section">
+      <div class="gp-setting"><span>Speed</span><input type="range" id="gpCursorSpeed" min="200" max="1600" step="50" class="av-slider"><span class="gp-val" id="gpCursorSpeedVal"></span></div>
+      <div class="gp-setting"><span>Dead Zone</span><input type="range" id="gpDeadZone" min="10" max="60" step="5" class="av-slider"><span class="gp-val" id="gpDeadZoneVal"></span></div>
+      <div class="gp-setting"><span>Size</span><input type="range" id="gpCursorSize" min="10" max="40" step="2" class="av-slider"><span class="gp-val" id="gpCursorSizeVal"></span></div>
+      <div class="gp-setting"><span>Opacity</span><input type="range" id="gpCursorOpacity" min="30" max="100" step="5" class="av-slider"><span class="gp-val" id="gpCursorOpacityVal"></span></div>
+      <div class="gp-setting"><span>Stick Cursor</span><label class="ri-toggle"><input type="checkbox" id="gpStickEnabled"><span class="ri-toggle-slider"></span></label></div>
+    </div>
+
+    <div class="av-group-label">Navigation</div>
+    <div class="av-section">
+      <div class="gp-setting"><span>Repeat Delay</span><input type="range" id="gpRepeatInitial" min="100" max="500" step="25" class="av-slider"><span class="gp-val" id="gpRepeatInitialVal"></span></div>
+      <div class="gp-setting"><span>Repeat Rate</span><input type="range" id="gpRepeatRate" min="50" max="200" step="10" class="av-slider"><span class="gp-val" id="gpRepeatRateVal"></span></div>
+      <div class="gp-setting"><span>Scroll Speed</span><input type="range" id="gpScrollSpeed" min="200" max="1200" step="50" class="av-slider"><span class="gp-val" id="gpScrollSpeedVal"></span></div>
+    </div>
+
+    <div class="av-group-label">On-Screen Keyboard</div>
+    <div class="av-section">
+      <div class="gp-setting"><span>Opacity</span><input type="range" id="gpOskOpacity" min="30" max="100" step="5" class="av-slider"><span class="gp-val" id="gpOskOpacityVal"></span></div>
+      <div class="gp-setting"><span>Auto-open on inputs</span><label class="ri-toggle"><input type="checkbox" id="gpOskAutoOpen"><span class="ri-toggle-slider"></span></label></div>
+    </div>
+
+    <div class="av-section" style="border:none;text-align:center;padding-top:16px">
+      <button class="av-reset-btn" id="gpResetBtn">Reset to Defaults</button>
     </div>
   </div>
 </div>
@@ -1674,9 +1780,12 @@ function renderApps(kioskUrl) {
     if (navLink) {
       navLink.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); navigate(app.url, false); });
     }
-    // Card click → open on this device (no click for moonlight)
+    // Card click → on kiosk: navigate in-place; on remote device: open new tab
+    const isKiosk = ['localhost', '127.0.0.1'].includes(location.hostname);
     if (isDisabled || isMoonlight) {
       // no click handler
+    } else if (isKiosk && !app.external) {
+      card.onclick = (e) => { if (!e.target.closest('.open-link')) navigate(app.url, false); };
     } else if (app.external) {
       card.onclick = () => { window.open(app.url, '_blank'); };
     } else {
@@ -2020,6 +2129,110 @@ function closeAvModal() {
   $('avModal').classList.remove('open');
 }
 $('avBtn').onclick = openAvModal;
+
+// ── Gamepad Panel ──
+let gpAnimFrame = null;
+function openGpModal() {
+  $('gpModal').classList.add('open');
+  loadGpSettings();
+  startGpVisualizer();
+}
+function closeGpModal() {
+  $('gpModal').classList.remove('open');
+  if (gpAnimFrame) { cancelAnimationFrame(gpAnimFrame); gpAnimFrame = null; }
+}
+$('gamepadBtn').onclick = openGpModal;
+$('gpClose').onclick = closeGpModal;
+$('gpModal').onclick = (e) => { if (e.target.id === 'gpModal') closeGpModal(); };
+
+// Settings UI ↔ gamepad-nav.js
+const gpSliders = [
+  { id: 'gpCursorSpeed', key: 'cursorSpeed', suffix: ' px/s' },
+  { id: 'gpDeadZone', key: 'deadZone', mul: 0.01, suffix: '', fmt: v => (v * 0.01).toFixed(2) },
+  { id: 'gpCursorSize', key: 'cursorSize', suffix: ' px' },
+  { id: 'gpCursorOpacity', key: 'cursorOpacity', mul: 0.01, suffix: '', fmt: v => (v * 0.01).toFixed(2) },
+  { id: 'gpRepeatInitial', key: 'repeatInitial', suffix: ' ms' },
+  { id: 'gpRepeatRate', key: 'repeatRate', suffix: ' ms' },
+  { id: 'gpScrollSpeed', key: 'scrollSpeed', suffix: ' px/s' },
+  { id: 'gpOskOpacity', key: 'oskOpacity', mul: 0.01, suffix: '', fmt: v => (v * 0.01).toFixed(2) },
+];
+const gpToggles = [
+  { id: 'gpStickEnabled', key: 'stickCursorEnabled' },
+  { id: 'gpOskAutoOpen', key: 'oskAutoOpen' },
+];
+
+function loadGpSettings() {
+  const s = window.GamepadNav ? window.GamepadNav.getSettings() : {};
+  for (const sl of gpSliders) {
+    const el = $(sl.id);
+    const val = s[sl.key] !== undefined ? s[sl.key] : 0;
+    el.value = sl.mul ? Math.round(val / sl.mul) : val;
+    $(sl.id + 'Val').textContent = sl.fmt ? sl.fmt(parseFloat(el.value)) : (el.value + sl.suffix);
+  }
+  for (const tg of gpToggles) {
+    $(tg.id).checked = s[tg.key] !== false;
+  }
+}
+
+// Bind slider changes
+for (const sl of gpSliders) {
+  $(sl.id).addEventListener('input', () => {
+    const raw = parseFloat($(sl.id).value);
+    const val = sl.mul ? raw * sl.mul : raw;
+    $(sl.id + 'Val').textContent = sl.fmt ? sl.fmt(raw) : (raw + sl.suffix);
+    if (window.GamepadNav) window.GamepadNav.setSettings({ [sl.key]: val });
+  });
+}
+for (const tg of gpToggles) {
+  $(tg.id).addEventListener('change', () => {
+    if (window.GamepadNav) window.GamepadNav.setSettings({ [tg.key]: $(tg.id).checked });
+  });
+}
+$('gpResetBtn').onclick = () => {
+  if (window.GamepadNav) { window.GamepadNav.resetSettings(); loadGpSettings(); }
+};
+
+// Visualizer loop
+function startGpVisualizer() {
+  function vizLoop() {
+    gpAnimFrame = requestAnimationFrame(vizLoop);
+    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+    let gp = null;
+    for (const g of gamepads) { if (g && g.connected) { gp = g; break; } }
+    const nameEl = $('gpControllerName');
+    if (!gp) {
+      nameEl.textContent = 'No controller detected';
+      return;
+    }
+    nameEl.textContent = gp.id.replace(/\s*\(.*?\)\s*/g, ' ').trim() || 'Controller';
+    // Buttons
+    document.querySelectorAll('#gpVisualizer .gp-btn').forEach(el => {
+      const idx = parseInt(el.dataset.b);
+      if (!isNaN(idx) && gp.buttons[idx]) {
+        el.classList.toggle('active', gp.buttons[idx].pressed);
+      }
+    });
+    // Triggers
+    const setFill = (id, idx) => {
+      const el = $(id);
+      if (el && gp.buttons[idx]) el.style.width = Math.round(gp.buttons[idx].value * 100) + '%';
+    };
+    setFill('gpL1', 4); setFill('gpR1', 5);
+    setFill('gpL2', 6); setFill('gpR2', 7);
+    // Sticks
+    const setStick = (dotId, xi, yi) => {
+      const dot = $(dotId);
+      if (!dot || gp.axes.length <= yi) return;
+      const x = gp.axes[xi] || 0;
+      const y = gp.axes[yi] || 0;
+      dot.style.left = (50 + x * 40) + '%';
+      dot.style.top = (50 + y * 40) + '%';
+    };
+    setStick('gpLDot', 0, 1);
+    setStick('gpRDot', 2, 3);
+  }
+  vizLoop();
+}
 $('avClose').onclick = () => history.back();
 $('avModal').onclick = (e) => { if (e.target === $('avModal')) history.back(); };
 
@@ -2598,6 +2811,35 @@ setInterval(loadDiagnostics, 10000);
 setInterval(loadSystem, 10000);
 
 document.querySelector('header h1').onclick = async () => {
+  showToast('Navigating to dashboard...');
+  // Check if a native app (Dolphin/SpaghettiKart/RetroArch) is running — needs kiosk restart
+  let needsRestart = false;
+  try {
+    const dr = await fetch('http://' + location.hostname + ':3460/api/status', { signal: AbortSignal.timeout(1000) });
+    const ds = await dr.json();
+    if (ds.state === 'playing') { needsRestart = true; await fetch('http://' + location.hostname + ':3460/api/stop', { method: 'POST', signal: AbortSignal.timeout(2000) }); }
+  } catch {}
+  try {
+    const sr = await fetch('http://' + location.hostname + ':3462/api/status', { signal: AbortSignal.timeout(1000) });
+    const ss = await sr.json();
+    if (ss.state === 'playing') { needsRestart = true; await fetch('http://' + location.hostname + ':3462/api/stop', { method: 'POST', signal: AbortSignal.timeout(2000) }); }
+  } catch {}
+  if (needsRestart) {
+    // Native app was running — kiosk needs restart to get Chrome back
+    await fetch('/api/restart-kiosk', { method: 'POST' });
+    setTimeout(loadStatus, 5000);
+  } else {
+    // Web page is being served — just navigate
+    navigate('http://127.0.0.1/', false);
+  }
+};
+
+urlInput.addEventListener('input', renderHistory);
+urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') navigate(urlInput.value.trim()); });
+goBtn.onclick = () => navigate(urlInput.value.trim());
+
+// Restart Kiosk
+$('restartKioskBtn').onclick = async () => {
   if (!confirm('Restart the kiosk service?')) return;
   showToast('Restarting kiosk...');
   try {
@@ -2613,10 +2855,6 @@ document.querySelector('header h1').onclick = async () => {
     showToast('Request failed', 'error');
   }
 };
-
-urlInput.addEventListener('input', renderHistory);
-urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') navigate(urlInput.value.trim()); });
-goBtn.onclick = () => navigate(urlInput.value.trim());
 
 // Reboot
 $('rebootBtn').onclick = async () => {
@@ -2885,6 +3123,35 @@ const server = serve({
         return Response.json(data);
       } catch {
         return Response.json({ players: [], hw: [] });
+      }
+    }
+
+    if (path === "/gamepad-nav.js") {
+      const f = Bun.file(import.meta.dir + "/gamepad-nav.js");
+      return new Response(f, { headers: { "Content-Type": "application/javascript", "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*" } });
+    }
+
+    // Gamepad config API
+    if (path === "/api/gamepad/config") {
+      if (req.method === "GET") {
+        try {
+          const raw = readFileSync(GAMEPAD_CONFIG_FILE, "utf-8");
+          return Response.json(JSON.parse(raw), { headers: { "Access-Control-Allow-Origin": "*" } });
+        } catch {
+          return Response.json({}, { headers: { "Access-Control-Allow-Origin": "*" } });
+        }
+      }
+      if (req.method === "POST") {
+        try {
+          const body = await req.json();
+          writeFileSync(GAMEPAD_CONFIG_FILE, JSON.stringify(body, null, 2) + "\n");
+          return Response.json({ ok: true }, { headers: { "Access-Control-Allow-Origin": "*" } });
+        } catch (e: any) {
+          return Response.json({ ok: false, error: e.message }, { status: 500, headers: { "Access-Control-Allow-Origin": "*" } });
+        }
+      }
+      if (req.method === "OPTIONS") {
+        return new Response(null, { headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type" } });
       }
     }
 

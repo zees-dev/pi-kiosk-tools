@@ -36,3 +36,4 @@ dolphin/data/Config/TimePlayed.ini
 dolphin/data/Config/btdinf.bak
 dolphin/data/Config/RetroAchievements.ini
 dashboard/display-config.json
+dashboard/gamepad-config.json
