@@ -76,6 +76,50 @@ function saveConfig(cfg: VpadConfig) {
 }
 let globalHubEnabled = loadConfig().globalHub;
 
+// ── Reset Combo: L1+L2+L3+R1+R2+R3 → reset kiosk to dashboard ─────────
+// Bits: L1=4, R1=5, L2=6, R2=7, L3=10, R3=11
+const RESET_COMBO = (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 10) | (1 << 11);
+let resetComboActive = false;
+
+function checkResetCombo(state: Uint8Array | number[]): void {
+  if (!state || state.length < 10) return;
+  const buttons = state[0] | (state[1] << 8) | (state[2] << 16) | (state[3] << 24);
+  // L1=bit4, R1=bit5, L3=bit10, R3=bit11 from digital buttons
+  const digitalBits = (1 << 4) | (1 << 5) | (1 << 10) | (1 << 11);
+  const hasDigital = (buttons & digitalBits) === digitalBits;
+  // L2/R2: check both digital buttons (bits 6,7) AND analog axes (bytes 8,9 > 200)
+  const l2 = !!(buttons & (1 << 6)) || state[8] > 200;
+  const r2 = !!(buttons & (1 << 7)) || state[9] > 200;
+  const comboPressed = hasDigital && l2 && r2;
+  if (comboPressed && !resetComboActive) {
+    resetComboActive = true;
+    console.log("[reset] L1+L2+L3+R1+R2+R3 combo detected — resetting to dashboard");
+    triggerDashboardReset();
+  } else if (!comboPressed) {
+    resetComboActive = false;
+  }
+}
+
+async function triggerDashboardReset(): Promise<void> {
+  try {
+    // Stop any running native apps
+    try { await fetch("http://127.0.0.1:3460/api/stop", { method: "POST", signal: AbortSignal.timeout(2000) }); } catch {}
+    try { await fetch("http://127.0.0.1:3462/api/stop", { method: "POST", signal: AbortSignal.timeout(2000) }); } catch {}
+    // Navigate kiosk to dashboard (or restart if native app was running)
+    await fetch("http://127.0.0.1/api/navigate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "http://127.0.0.1/", recordHistory: false }),
+      signal: AbortSignal.timeout(3000),
+    });
+    console.log("[reset] Navigated to dashboard");
+  } catch (e: any) {
+    console.error("[reset] Failed:", e.message);
+    // Fallback: restart kiosk
+    try { await fetch("http://127.0.0.1/api/restart-kiosk", { method: "POST", signal: AbortSignal.timeout(5000) }); } catch {}
+  }
+}
+
 // EVIOCGRAB ioctl: _IOW('E', 0x90, int) — exclusively grab an evdev device
 // _IOW(type, nr, size) on aarch64 = ((1 << 30) | (size << 16) | (type << 8) | nr)
 const EVIOCGRAB = ((1 << 30) | (4 << 16) | (0x45 << 8) | 0x90) >>> 0;
@@ -706,8 +750,9 @@ if (globalHubEnabled) {
 
 // ── View broadcast ──────────────────────────────────────────────────────
 function broadcastPlayerState(idx: number) {
-  if (viewClients.size === 0) return;
   const s = slots[idx];
+  if (s.lastState) checkResetCombo(s.lastState);
+  if (viewClients.size === 0) return;
   const msg = JSON.stringify({
     type: "player",
     slot: idx + 1,
@@ -720,9 +765,9 @@ function broadcastPlayerState(idx: number) {
 }
 
 function broadcastHwState(eventPath: string) {
-  if (viewClients.size === 0) return;
   const hw = hwControllers.get(eventPath);
   if (!hw) return;
+  checkResetCombo(hw.state);
   const msg = JSON.stringify({
     type: "hw",
     eventPath,

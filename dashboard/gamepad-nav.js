@@ -213,7 +213,28 @@
     ];
     for (const { bit, dir } of dirs) {
       if (justPressed(bit)) {
-        const action = oskOpen ? () => oskNav(dir) : () => spatialNav(dir);
+        let action;
+        if (oskOpen) {
+          action = () => oskNav(dir);
+        } else if (focusedEl && focusedEl.tagName === 'INPUT' && focusedEl.type === 'range' && (dir === 'left' || dir === 'right')) {
+          // Adjust slider value with d-pad left/right
+          action = () => {
+            const step = parseFloat(focusedEl.step) || 1;
+            const delta = dir === 'right' ? step : -step;
+            focusedEl.value = String(Math.min(parseFloat(focusedEl.max), Math.max(parseFloat(focusedEl.min), parseFloat(focusedEl.value) + delta)));
+            focusedEl.dispatchEvent(new Event('input', { bubbles: true }));
+            focusedEl.dispatchEvent(new Event('change', { bubbles: true }));
+          };
+        } else if (focusedEl && focusedEl.tagName === 'SELECT' && (dir === 'up' || dir === 'down')) {
+          // Cycle select options with d-pad up/down
+          action = () => {
+            const delta = dir === 'down' ? 1 : -1;
+            focusedEl.selectedIndex = Math.max(0, Math.min(focusedEl.options.length - 1, focusedEl.selectedIndex + delta));
+            focusedEl.dispatchEvent(new Event('change', { bubbles: true }));
+          };
+        } else {
+          action = () => spatialNav(dir);
+        }
         startRepeat(dir, action);
       }
       if (justReleased(bit)) {
@@ -379,7 +400,15 @@
   }
 
   // ── Click ─────────────────────────────────────────────────────────────
-  function clickElement(el) {
+  function simulateClick(el, x, y) {
+    // Dispatch full mouse event sequence at coordinates
+    const opts = { bubbles: true, clientX: x, clientY: y, button: 0 };
+    el.dispatchEvent(new MouseEvent('mousedown', opts));
+    el.dispatchEvent(new MouseEvent('mouseup', opts));
+    el.dispatchEvent(new MouseEvent('click', opts));
+  }
+
+  function clickElement(el, fromCursor) {
     if (!el) return;
     // For <select>, cycle to next option on A press
     if (el.tagName === 'SELECT') {
@@ -390,9 +419,14 @@
       el.dispatchEvent(new Event('input', { bubbles: true }));
       return;
     }
-    el.click();
+    // For canvas/interactive elements, use full mouse event sequence with coordinates
+    if (fromCursor) {
+      simulateClick(el, cursorX, cursorY);
+    } else {
+      el.click();
+    }
     if (el.focus) el.focus();
-    if (settings.oskAutoOpen && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
+    if (settings.oskAutoOpen && (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type !== 'range' && el.type !== 'checkbox' && el.type !== 'radio'))) {
       if (!oskOpen) toggleOSK();
     }
   }
@@ -400,9 +434,9 @@
   function activateFocused() {
     if (cursorVisible && settings.stickCursorEnabled) {
       const el = document.elementFromPoint(cursorX, cursorY);
-      if (el) { clickElement(el); return; }
+      if (el) { clickElement(el, true); return; }
     }
-    if (focusedEl) clickElement(focusedEl);
+    if (focusedEl) clickElement(focusedEl, false);
   }
 
   // ── Back / Close ──────────────────────────────────────────────────────

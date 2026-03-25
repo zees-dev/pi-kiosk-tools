@@ -236,6 +236,7 @@ async function launchGame(): Promise<{ ok: boolean; error?: string }> {
       `LIBSEAT_BACKEND=seatd`,
       `HOME=/var/cache/kiosk-home`,
       `SDL_VIDEODRIVER=wayland`,
+      `WLR_NO_HARDWARE_CURSORS=1`,
       CAGE_BIN, ...cageArgs
     ], {
       cwd: GAME_DIR,
