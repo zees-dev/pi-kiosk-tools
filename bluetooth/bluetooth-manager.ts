@@ -1023,6 +1023,7 @@ const indexHtml = `<!DOCTYPE html>
       button { width: 100%; }
     }
   </style>
+<script src="http://127.0.0.1/gamepad-nav.js"></script>
 </head>
 <body>
   <div class="container">
@@ -1357,7 +1358,7 @@ const indexHtml = `<!DOCTYPE html>
     }
     
     async function removeDevice(path) {
-      if (!confirm('Remove this device? It will need to be paired again.')) return;
+      const ok = window.gamepadConfirm ? await window.gamepadConfirm('Remove this device? It will need to be paired again.') : confirm('Remove this device? It will need to be paired again.'); if (!ok) return;
       const res = await api('/device/remove', 'POST', { path });
       if (res.error) alert('Remove failed: ' + res.error);
       await refreshDevices();

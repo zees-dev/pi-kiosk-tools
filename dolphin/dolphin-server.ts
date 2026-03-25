@@ -1539,6 +1539,7 @@ const HTML = `<!DOCTYPE html>
   .toast.error { background: #c62828; }
   .toast.success { background: #2e7d32; }
 </style>
+<script src="http://127.0.0.1/gamepad-nav.js"></script>
 </head>
 <body>
 <div class="container">
@@ -1856,7 +1857,7 @@ function downloadSave(path) {
 }
 
 async function deleteSave(path, name) {
-  if (!confirm('Delete save file?\\n\\n' + name + '\\n\\nThis cannot be undone.')) return;
+  const ok = window.gamepadConfirm ? await window.gamepadConfirm('Delete save file?\\n\\n' + name) : confirm('Delete save file?'); if (!ok) return;
   try {
     const resp = await fetch('/api/saves/delete', {
       method: 'POST',
@@ -1945,7 +1946,7 @@ async function applyBuiltinProfile(index) {
 
 async function applyProfile(index) {
   const p = profiles[index];
-  if (!confirm('Apply profile "' + p.name + '"?\\nThis will overwrite current settings.')) return;
+  const ok1 = window.gamepadConfirm ? await window.gamepadConfirm('Apply profile "' + p.name + '"?\\nThis will overwrite current settings.') : confirm('Apply profile?'); if (!ok1) return;
   try {
     const resp = await fetch('/api/profiles/apply', {
       method: 'POST',
@@ -1965,7 +1966,7 @@ async function applyProfile(index) {
 
 async function deleteProfile(index) {
   const p = profiles[index];
-  if (!confirm('Delete profile "' + p.name + '"?')) return;
+  const ok2 = window.gamepadConfirm ? await window.gamepadConfirm('Delete profile "' + p.name + '"?') : confirm('Delete profile?'); if (!ok2) return;
   try {
     const resp = await fetch('/api/profiles/delete', {
       method: 'POST',
@@ -1983,7 +1984,7 @@ async function deleteProfile(index) {
 }
 
 async function revertSettings() {
-  if (!confirm('Revert to previous settings?')) return;
+  const ok3 = window.gamepadConfirm ? await window.gamepadConfirm('Revert to previous settings?') : confirm('Revert?'); if (!ok3) return;
   try {
     const resp = await fetch('/api/settings/revert', { method: 'POST' });
     const data = await resp.json();
@@ -2296,8 +2297,8 @@ const BUILTIN_PROFILES = [
   }},
 ];
 
-function resetDefaults() {
-  if (!confirm('Reset all settings to defaults? You will still need to Save to apply.')) return;
+async function resetDefaults() {
+  const ok4 = window.gamepadConfirm ? await window.gamepadConfirm('Reset all settings to defaults?\\nYou will still need to Save to apply.') : confirm('Reset to defaults?'); if (!ok4) return;
   document.querySelectorAll('[data-key]').forEach(el => {
     const key = el.dataset.key;
     const def = DOLPHIN_DEFAULTS[key];

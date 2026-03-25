@@ -1535,7 +1535,8 @@ function attachPortsBodyHandlers(el) {
     btn.onclick = async (e) => {
       e.stopPropagation();
       if (btn.dataset.action === 'stop-dolphin') {
-        if (!confirm('Force stop Dolphin emulator?')) return;
+        const ok = window.gamepadConfirm ? await window.gamepadConfirm('Force stop Dolphin emulator?') : confirm('Force stop Dolphin emulator?');
+        if (!ok) return;
         showToast('Stopping Dolphin...');
         try {
           const resp = await fetch('http://' + location.hostname + ':3460/api/stop', { method: 'POST' });
@@ -1546,7 +1547,8 @@ function attachPortsBodyHandlers(el) {
         return;
       }
       const pid = btn.dataset.pid;
-      if (!confirm('Kill process ' + pid + '?\\n\\nNote: systemd may auto-restart this service.')) return;
+      const ok = window.gamepadConfirm ? await window.gamepadConfirm('Kill process ' + pid + '?\\n\\nNote: systemd may auto-restart this service.') : confirm('Kill process ' + pid + '?\\n\\nNote: systemd may auto-restart this service.');
+      if (!ok) return;
       showToast('Killing process ' + pid + '...');
       try {
         const resp = await fetch('/api/kill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid: parseInt(pid) }) });
@@ -1570,7 +1572,8 @@ function attachProcsBodyHandlers(el) {
     btn.onclick = async (e) => {
       e.stopPropagation();
       const pid = btn.dataset.pid;
-      if (!confirm('Kill process ' + pid + '?')) return;
+      const ok2 = window.gamepadConfirm ? await window.gamepadConfirm('Kill process ' + pid + '?') : confirm('Kill process ' + pid + '?');
+      if (!ok2) return;
       showToast('Killing process ' + pid + '...');
       try {
         const resp = await fetch('/api/kill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pid: parseInt(pid) }) });
@@ -2196,35 +2199,37 @@ $('gpResetBtn').onclick = () => {
 function startGpVisualizer() {
   function vizLoop() {
     gpAnimFrame = requestAnimationFrame(vizLoop);
-    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-    let gp = null;
-    for (const g of gamepads) { if (g && g.connected) { gp = g; break; } }
+    const controllers = window.GamepadNav ? window.GamepadNav.getState() : [];
     const nameEl = $('gpControllerName');
-    if (!gp) {
+    // Find first controller with state
+    const ctrl = controllers.find(c => c.state && c.state.length >= 10);
+    if (!ctrl) {
       nameEl.textContent = 'No controller detected';
+      // Clear all buttons
+      document.querySelectorAll('#gpVisualizer .gp-btn').forEach(el => el.classList.remove('active'));
       return;
     }
-    nameEl.textContent = gp.id.replace(/\s*\(.*?\)\s*/g, ' ').trim() || 'Controller';
-    // Buttons
+    nameEl.textContent = ctrl.name || ctrl.label || ('Player ' + (ctrl.slot || '?'));
+    const state = ctrl.state;
+    const buttons = state[0] | (state[1] << 8) | (state[2] << 16) | (state[3] << 24);
+    const axes = [state[4], state[5], state[6], state[7], state[8], state[9]];
+    // Buttons (data-b matches bitmask bit index)
     document.querySelectorAll('#gpVisualizer .gp-btn').forEach(el => {
-      const idx = parseInt(el.dataset.b);
-      if (!isNaN(idx) && gp.buttons[idx]) {
-        el.classList.toggle('active', gp.buttons[idx].pressed);
-      }
+      const bit = parseInt(el.dataset.b);
+      if (!isNaN(bit)) el.classList.toggle('active', !!(buttons & (1 << bit)));
     });
-    // Triggers
-    const setFill = (id, idx) => {
-      const el = $(id);
-      if (el && gp.buttons[idx]) el.style.width = Math.round(gp.buttons[idx].value * 100) + '%';
-    };
-    setFill('gpL1', 4); setFill('gpR1', 5);
-    setFill('gpL2', 6); setFill('gpR2', 7);
-    // Sticks
-    const setStick = (dotId, xi, yi) => {
+    // Triggers (L1=bit4, R1=bit5 as on/off; L2/R2 use axis values)
+    const setFill = (id, value) => { const el = $(id); if (el) el.style.width = Math.round(value) + '%'; };
+    setFill('gpL1', (buttons & (1 << 4)) ? 100 : 0);
+    setFill('gpR1', (buttons & (1 << 5)) ? 100 : 0);
+    setFill('gpL2', (axes[4] / 255) * 100);
+    setFill('gpR2', (axes[5] / 255) * 100);
+    // Sticks (0-255, 128=center → -1 to 1)
+    const setStick = (dotId, xAxis, yAxis) => {
       const dot = $(dotId);
-      if (!dot || gp.axes.length <= yi) return;
-      const x = gp.axes[xi] || 0;
-      const y = gp.axes[yi] || 0;
+      if (!dot) return;
+      const x = (axes[xAxis] - 128) / 128;
+      const y = (axes[yAxis] - 128) / 128;
       dot.style.left = (50 + x * 40) + '%';
       dot.style.top = (50 + y * 40) + '%';
     };
@@ -2840,7 +2845,8 @@ goBtn.onclick = () => navigate(urlInput.value.trim());
 
 // Restart Kiosk
 $('restartKioskBtn').onclick = async () => {
-  if (!confirm('Restart the kiosk service?')) return;
+  const ok = window.gamepadConfirm ? await window.gamepadConfirm('Restart the kiosk service?') : confirm('Restart the kiosk service?');
+  if (!ok) return;
   showToast('Restarting kiosk...');
   try {
     const resp = await fetch('/api/restart-kiosk', { method: 'POST' });
@@ -2858,7 +2864,8 @@ $('restartKioskBtn').onclick = async () => {
 
 // Reboot
 $('rebootBtn').onclick = async () => {
-  if (!confirm('Reboot the system?\\n\\nAll services will restart. This takes about 30-60 seconds.')) return;
+  const ok = window.gamepadConfirm ? await window.gamepadConfirm('Reboot the system?\\n\\nAll services will restart. This takes about 30-60 seconds.') : confirm('Reboot the system?\\n\\nAll services will restart. This takes about 30-60 seconds.');
+  if (!ok) return;
   showToast('Rebooting...');
   try {
     await fetch('/api/reboot', { method: 'POST' });

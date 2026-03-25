@@ -464,7 +464,7 @@ select{background:#282828;color:#e0e0e0;border:1px solid #333;border-radius:6px;
 .toast.show{opacity:1}
 .toast.error{background:#c62828}
 @media(max-width:400px){.slider-group input[type=range]{width:70px}.profile-card,.profile-add{min-width:120px}}
-</style></head><body>
+</style><script src="http://127.0.0.1/gamepad-nav.js"></script></head><body>
 <div class="header-row">
   <img src="/logo.png" class="header-logo" alt="SpaghettiKart">
   <div><h1>Spaghetti Kart</h1><div class="version">v${VERSION} · Mario Kart 64 PC Port</div></div>
@@ -638,7 +638,7 @@ async function saveSettings() {
 }
 
 async function resetDefaults() {
-  if (!confirm('Reset all settings to defaults? This will save immediately.')) return;
+  const ok = window.gamepadConfirm ? await window.gamepadConfirm('Reset all settings to defaults?\\nThis will save immediately.') : confirm('Reset to defaults?'); if (!ok) return;
   try {
     const resp = await fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ settings: JSON.parse(JSON.stringify(DEFAULTS)) }) });
     const data = await resp.json();
@@ -712,7 +712,7 @@ async function saveProfile() {
 
 async function applyProfile(index) {
   const p = profiles[index];
-  if (!confirm('Apply profile "' + p.name + '"? Current settings will be backed up for revert.')) return;
+  const ok1 = window.gamepadConfirm ? await window.gamepadConfirm('Apply profile "' + p.name + '"?\\nCurrent settings will be backed up for revert.') : confirm('Apply profile?'); if (!ok1) return;
   const resp = await fetch('/api/profiles/apply', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ index }) });
   const data = await resp.json();
   if (data.ok) {
@@ -724,7 +724,7 @@ async function applyProfile(index) {
 }
 
 async function deleteProfile(index) {
-  if (!confirm('Delete profile "' + profiles[index].name + '"?')) return;
+  const ok2 = window.gamepadConfirm ? await window.gamepadConfirm('Delete profile "' + profiles[index].name + '"?') : confirm('Delete profile?'); if (!ok2) return;
   const resp = await fetch('/api/profiles/delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ index }) });
   const data = await resp.json();
   if (data.ok) { profiles = data.profiles; renderProfiles(); showToast('Deleted'); }
@@ -732,7 +732,7 @@ async function deleteProfile(index) {
 }
 
 async function revertSettings() {
-  if (!confirm('Revert to previous settings? This is a one-shot revert.')) return;
+  const ok3 = window.gamepadConfirm ? await window.gamepadConfirm('Revert to previous settings?\\nThis is a one-shot revert.') : confirm('Revert?'); if (!ok3) return;
   const resp = await fetch('/api/profiles/revert', { method: 'POST' });
   const data = await resp.json();
   if (data.ok) {

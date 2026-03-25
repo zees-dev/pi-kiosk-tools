@@ -1,6 +1,9 @@
 /**
  * gamepad-nav.js — Controller navigation for kiosk web UIs
  * 
+ * Connects to virtual-pad WebSocket (/ws/view) for normalized input from
+ * ALL controller types (hardware, Bluetooth, virtual). No Gamepad API needed.
+ * 
  * Features:
  *   - D-pad spatial navigation between focusable elements
  *   - Left stick free cursor (virtual mouse)
@@ -13,7 +16,7 @@
  */
 (function() {
   'use strict';
-  if (window.GamepadNav) return; // Already loaded
+  if (window.GamepadNav) return;
 
   // ── Defaults ──────────────────────────────────────────────────────────
   const DEFAULTS = {
@@ -30,9 +33,8 @@
   };
 
   let settings = { ...DEFAULTS };
-  let settingsLoaded = false;
 
-  // ── Button indices (Standard Gamepad) ─────────────────────────────────
+  // ── Button bitmask (matches virtual-pad protocol) ─────────────────────
   const BTN = {
     A: 0, B: 1, X: 2, Y: 3,
     L1: 4, R1: 5, L2: 6, R2: 7,
@@ -43,25 +45,25 @@
   };
 
   // ── State ─────────────────────────────────────────────────────────────
-  let cursorX = window.innerWidth / 2;
-  let cursorY = window.innerHeight / 2;
+  let cursorX = 0, cursorY = 0, cursorInited = false;
   let cursorVisible = false;
   let cursorHideTimer = null;
   let focusedEl = null;
-  let prevButtons = new Array(17).fill(false);
+  let prevButtons = 0;
+  let prevAxes = [128, 128, 128, 128, 0, 0]; // LX, LY, RX, RY, L2, R2
   let dpadRepeatTimers = {};
   let oskOpen = false;
-  let oskFocusRow = 1;
-  let oskFocusCol = 4;
-  let lastTimestamp = 0;
+  let oskFocusRow = 1, oskFocusCol = 4;
+  let lastFrameTime = 0;
   let gamepadActive = false;
   let disabled = false;
+  let ws = null;
+  let wsReconnectTimer = null;
+  let latestControllers = []; // for getState() API
 
-  // ── Detect if we should disable (e.g. EmulatorJS running) ─────────────
+  // ── Detect if we should disable ───────────────────────────────────────
   function shouldDisable() {
-    // EmulatorJS active
     if (window.EJS_emulator && window.EJS_emulator.game && window.EJS_emulator.game.canvas) return true;
-    // Check for data attribute
     if (document.body && document.body.dataset.gamepadNavDisable === 'true') return true;
     return false;
   }
@@ -75,11 +77,10 @@
         settings = { ...DEFAULTS, ...saved };
       }
     } catch {}
-    settingsLoaded = true;
   }
 
-  async function saveSettings(patch) {
-    settings = { ...settings, ...patch };
+  async function saveSettings(s) {
+    settings = { ...settings, ...s };
     try {
       await fetch('http://127.0.0.1/api/gamepad/config', {
         method: 'POST',
@@ -87,6 +88,162 @@
         body: JSON.stringify(settings),
       });
     } catch {}
+  }
+
+  // ── WebSocket to virtual-pad ──────────────────────────────────────────
+  function connectWS() {
+    if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
+    try {
+      // Use wss for port 3461
+      ws = new WebSocket('wss://127.0.0.1:3461/ws/view');
+      ws.onopen = () => {
+        gamepadActive = true;
+        console.log('[gamepad-nav] Connected to virtual-pad');
+      };
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          handleMessage(msg);
+        } catch {}
+      };
+      ws.onclose = () => {
+        gamepadActive = false;
+        scheduleReconnect();
+      };
+      ws.onerror = () => {
+        scheduleReconnect();
+      };
+    } catch {
+      scheduleReconnect();
+    }
+  }
+
+  function scheduleReconnect() {
+    if (wsReconnectTimer) return;
+    wsReconnectTimer = setTimeout(() => {
+      wsReconnectTimer = null;
+      connectWS();
+    }, 3000);
+  }
+
+  // ── Handle messages from virtual-pad ──────────────────────────────────
+  function handleMessage(msg) {
+    if (disabled || shouldDisable()) return;
+
+    if (msg.type === 'full') {
+      latestControllers = [...(msg.players || []), ...(msg.hw || [])];
+      // Process first controller with state
+      const first = latestControllers.find(c => c.state);
+      if (first) processState(first.state);
+    } else if (msg.type === 'player' && msg.state) {
+      updateControllerList(msg);
+      processState(msg.state);
+    } else if (msg.type === 'hw' && msg.state) {
+      updateControllerList(msg);
+      processState(msg.state);
+    } else if (msg.type === 'connect' || msg.type === 'disconnect') {
+      // Just update list, no state to process
+    }
+  }
+
+  function updateControllerList(msg) {
+    // Keep a running list for getState() API
+    const key = msg.slot ? 'p' + msg.slot : msg.eventPath;
+    const idx = latestControllers.findIndex(c => (c.slot ? 'p' + c.slot : c.eventPath) === key);
+    if (idx >= 0) latestControllers[idx] = msg;
+    else latestControllers.push(msg);
+  }
+
+  // ── Process normalized state (10-12 byte array) ───────────────────────
+  function processState(state) {
+    if (!state || state.length < 10) return;
+
+    const now = performance.now();
+    const dt = lastFrameTime ? (now - lastFrameTime) / 1000 : 0.016;
+    lastFrameTime = now;
+
+    // Decode
+    const buttons = state[0] | (state[1] << 8) | (state[2] << 16) | (state[3] << 24);
+    const axes = [state[4], state[5], state[6], state[7], state[8], state[9]];
+
+    // ── Button edge detection ───────────────────────────────────────
+    function justPressed(bit) { return (buttons & (1 << bit)) && !(prevButtons & (1 << bit)); }
+    function justReleased(bit) { return !(buttons & (1 << bit)) && (prevButtons & (1 << bit)); }
+
+    // ── Custom confirm dialog navigation ────────────────────────────
+    if (isConfirmOpen()) {
+      if (justPressed(BTN.LEFT) || justPressed(BTN.RIGHT)) {
+        confirmFocus = confirmFocus === 0 ? 1 : 0;
+        updateConfirmFocus();
+      }
+      if (justPressed(BTN.A)) resolveConfirm(confirmFocus === 1);
+      if (justPressed(BTN.B)) resolveConfirm(false);
+      prevButtons = buttons;
+      prevAxes = axes;
+      return; // Don't process other inputs while confirm is open
+    }
+
+    // A = click
+    if (justPressed(BTN.A)) {
+      if (oskOpen) {
+        pressOSKKey(oskFocusRow, oskFocusCol);
+      } else {
+        activateFocused();
+      }
+    }
+
+    // B = back/close
+    if (justPressed(BTN.B)) goBack();
+
+    // L1 = browser back
+    if (justPressed(BTN.L1)) history.back();
+
+    // R1 = browser forward
+    if (justPressed(BTN.R1)) history.forward();
+
+    // Start = toggle OSK
+    if (justPressed(BTN.START)) toggleOSK();
+
+    // ── D-pad with repeat ───────────────────────────────────────────
+    const dirs = [
+      { bit: BTN.UP, dir: 'up' },
+      { bit: BTN.DOWN, dir: 'down' },
+      { bit: BTN.LEFT, dir: 'left' },
+      { bit: BTN.RIGHT, dir: 'right' },
+    ];
+    for (const { bit, dir } of dirs) {
+      if (justPressed(bit)) {
+        const action = oskOpen ? () => oskNav(dir) : () => spatialNav(dir);
+        startRepeat(dir, action);
+      }
+      if (justReleased(bit)) {
+        stopRepeat(dir);
+      }
+    }
+
+    // ── Left stick → cursor ─────────────────────────────────────────
+    if (settings.stickCursorEnabled) {
+      const lx = (axes[0] - 128) / 128; // -1 to 1
+      const ly = (axes[1] - 128) / 128;
+      const alx = Math.abs(lx) > settings.deadZone ? lx : 0;
+      const aly = Math.abs(ly) > settings.deadZone ? ly : 0;
+      if (alx !== 0 || aly !== 0) {
+        moveCursor(alx * settings.cursorSpeed * dt, aly * settings.cursorSpeed * dt);
+      }
+    }
+
+    // ── Right stick → scroll ────────────────────────────────────────
+    const rx = (axes[2] - 128) / 128;
+    const ry = (axes[3] - 128) / 128;
+    const arx = Math.abs(rx) > settings.deadZone ? rx : 0;
+    const ary = Math.abs(ry) > settings.deadZone ? ry : 0;
+    if (arx !== 0 || ary !== 0) {
+      scrollPage(arx * settings.scrollSpeed * dt, ary * settings.scrollSpeed * dt);
+      syncFocusRing();
+    }
+
+    prevButtons = buttons;
+    prevAxes = axes;
   }
 
   // ── Cursor Element ────────────────────────────────────────────────────
@@ -105,9 +262,8 @@
 
   function updateCursorStyle() {
     if (!cursorEl) return;
-    const s = settings.cursorSize;
-    cursorEl.style.width = s + 'px';
-    cursorEl.style.height = s + 'px';
+    cursorEl.style.width = settings.cursorSize + 'px';
+    cursorEl.style.height = settings.cursorSize + 'px';
   }
 
   function showCursor() {
@@ -122,6 +278,11 @@
   }
 
   function moveCursor(dx, dy) {
+    if (!cursorInited) {
+      cursorX = window.innerWidth / 2;
+      cursorY = window.innerHeight / 2;
+      cursorInited = true;
+    }
     cursorX = Math.max(0, Math.min(window.innerWidth, cursorX + dx));
     cursorY = Math.max(0, Math.min(window.innerHeight, cursorY + dy));
     if (cursorEl) {
@@ -145,10 +306,9 @@
 
   function updateFocusRing(el) {
     ensureFocusRing();
-    if (!el) {
-      focusRingEl.style.opacity = '0';
-      return;
-    }
+    if (!el) { focusRingEl.style.opacity = '0'; return; }
+    // Instant scroll to keep up with rapid d-pad
+    el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
     const rect = el.getBoundingClientRect();
     const pad = 3;
     focusRingEl.style.left = (rect.left - pad) + 'px';
@@ -156,27 +316,21 @@
     focusRingEl.style.width = (rect.width + pad * 2) + 'px';
     focusRingEl.style.height = (rect.height + pad * 2) + 'px';
     focusRingEl.style.opacity = '1';
-    // Scroll into view
-    el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
 
   // ── Focusable Elements ────────────────────────────────────────────────
   function getNavigableElements() {
     const custom = window.GAMEPAD_NAV && window.GAMEPAD_NAV.focusSelector;
-    const selector = custom || 'button, a[href], [onclick], input, select, textarea, .app-card, .game-card, .setting-row, [data-nav]';
+    const selector = custom || 'button, a[href], [onclick], input, select, textarea, .app-card, .game-card, .setting-row, .remote-btn, .remote-half, h1, [data-nav]';
     const all = Array.from(document.querySelectorAll(selector));
-    // Also check shadow DOMs
     document.querySelectorAll('*').forEach(el => {
-      if (el.shadowRoot) {
-        all.push(...Array.from(el.shadowRoot.querySelectorAll(selector)));
-      }
+      if (el.shadowRoot) all.push(...Array.from(el.shadowRoot.querySelectorAll(selector)));
     });
     return all.filter(el => {
-      if (el.offsetParent === null && el.style.display !== 'fixed') return false; // hidden
+      if (el.offsetParent === null && el.style.position !== 'fixed') return false;
       if (el.disabled) return false;
       const rect = el.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) return false;
-      return true;
+      return rect.width > 0 && rect.height > 0;
     });
   }
 
@@ -195,18 +349,15 @@
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
 
-    let best = null;
-    let bestDist = Infinity;
+    let best = null, bestDist = Infinity;
 
     for (const el of elements) {
       if (el === focusedEl) continue;
       const r = el.getBoundingClientRect();
       const ex = r.left + r.width / 2;
       const ey = r.top + r.height / 2;
-      const dx = ex - cx;
-      const dy = ey - cy;
+      const dx = ex - cx, dy = ey - cy;
 
-      // Direction filter
       let valid = false;
       switch (direction) {
         case 'up':    valid = dy < -10; break;
@@ -216,66 +367,57 @@
       }
       if (!valid) continue;
 
-      // Prefer elements in a cone (primary axis weighted more)
       const primaryDist = (direction === 'up' || direction === 'down') ? Math.abs(dy) : Math.abs(dx);
       const crossDist = (direction === 'up' || direction === 'down') ? Math.abs(dx) : Math.abs(dy);
-      
-      // Skip if too far off-axis (cone filter: cross < 2x primary)
       if (crossDist > primaryDist * 2.5) continue;
 
       const dist = primaryDist + crossDist * 0.5;
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = el;
-      }
+      if (dist < bestDist) { bestDist = dist; best = el; }
     }
 
-    if (best) {
-      focusedEl = best;
-      updateFocusRing(focusedEl);
-    }
+    if (best) { focusedEl = best; updateFocusRing(focusedEl); }
   }
 
   // ── Click ─────────────────────────────────────────────────────────────
+  function clickElement(el) {
+    if (!el) return;
+    // For <select>, cycle to next option on A press
+    if (el.tagName === 'SELECT') {
+      el.focus();
+      const idx = el.selectedIndex;
+      el.selectedIndex = (idx + 1) % el.options.length;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
+    el.click();
+    if (el.focus) el.focus();
+    if (settings.oskAutoOpen && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
+      if (!oskOpen) toggleOSK();
+    }
+  }
+
   function activateFocused() {
     if (cursorVisible && settings.stickCursorEnabled) {
-      // Click under cursor
       const el = document.elementFromPoint(cursorX, cursorY);
-      if (el) {
-        el.click();
-        el.focus && el.focus();
-        // Auto-open OSK for inputs
-        if (settings.oskAutoOpen && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT')) {
-          if (!oskOpen) toggleOSK();
-        }
-        return;
-      }
+      if (el) { clickElement(el); return; }
     }
-    if (focusedEl) {
-      focusedEl.click();
-      focusedEl.focus && focusedEl.focus();
-      // Auto-open OSK for inputs
-      if (settings.oskAutoOpen && (focusedEl.tagName === 'INPUT' || focusedEl.tagName === 'TEXTAREA' || focusedEl.tagName === 'SELECT')) {
-        if (!oskOpen) toggleOSK();
-      }
-    }
+    if (focusedEl) clickElement(focusedEl);
   }
 
   // ── Back / Close ──────────────────────────────────────────────────────
   function goBack() {
-    // Try closing any open modal/overlay first
-    const overlay = document.querySelector('.qr-overlay.open, [style*="display: block"][style*="position: absolute"], .modal.open');
+    if (oskOpen) { toggleOSK(); return; }
+    const overlay = document.querySelector('.qr-overlay.open, .modal-overlay.open');
     if (overlay) {
-      const closeBtn = overlay.querySelector('[onclick*="close"], .close-btn, button:last-child');
+      const closeBtn = overlay.querySelector('.modal-close, .qr-close, [onclick*="close"]');
       if (closeBtn) { closeBtn.click(); return; }
     }
-    if (oskOpen) { toggleOSK(); return; }
     history.back();
   }
 
   // ── Scroll ────────────────────────────────────────────────────────────
   function scrollPage(dx, dy) {
-    // Find nearest scrollable container
     let target = document.elementFromPoint(cursorX || window.innerWidth / 2, cursorY || window.innerHeight / 2);
     while (target && target !== document.body) {
       if (target.scrollHeight > target.clientHeight || target.scrollWidth > target.clientWidth) {
@@ -303,8 +445,7 @@
     ['','','Space','','←','→'],
   ];
 
-  let oskShift = false;
-  let oskEl = null;
+  let oskShift = false, oskEl = null;
 
   function createOSK() {
     if (oskEl) return;
@@ -320,8 +461,7 @@
 
   function updateOSKStyle() {
     if (!oskEl) return;
-    const a = settings.oskOpacity;
-    oskEl.style.background = 'rgba(15,15,15,' + a + ')';
+    oskEl.style.background = 'rgba(15,15,15,' + settings.oskOpacity + ')';
   }
 
   function renderOSK() {
@@ -348,14 +488,11 @@
       html += '</div>';
     }
     oskEl.innerHTML = html;
-    // Click handlers
     oskEl.querySelectorAll('[data-osk-r]').forEach(el => {
       el.addEventListener('click', () => {
-        const r = parseInt(el.dataset.oskR);
-        const c = parseInt(el.dataset.oskC);
-        oskFocusRow = r;
-        oskFocusCol = c;
-        pressOSKKey(r, c);
+        oskFocusRow = parseInt(el.dataset.oskR);
+        oskFocusCol = parseInt(el.dataset.oskC);
+        pressOSKKey(oskFocusRow, oskFocusCol);
         renderOSK();
       });
     });
@@ -365,8 +502,7 @@
     const rows = oskShift ? OSK_ROWS_SHIFT : OSK_ROWS;
     if (r >= rows.length || c >= rows[r].length) return;
     const key = rows[r][c];
-    if (key === '' || !key) return;
-    
+    if (!key) return;
     const active = document.activeElement;
     const isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
 
@@ -382,22 +518,16 @@
     } else if (key === '↵') {
       if (isInput && active.tagName === 'INPUT') {
         active.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-        active.form && active.form.dispatchEvent(new Event('submit', { bubbles: true }));
+        if (active.form) active.form.dispatchEvent(new Event('submit', { bubbles: true }));
       }
       toggleOSK();
     } else if (key === '⇧') {
       oskShift = !oskShift;
       renderOSK();
     } else if (key === '←') {
-      if (isInput) {
-        const pos = active.selectionStart || 0;
-        active.selectionStart = active.selectionEnd = Math.max(0, pos - 1);
-      }
+      if (isInput) active.selectionStart = active.selectionEnd = Math.max(0, (active.selectionStart || 0) - 1);
     } else if (key === '→') {
-      if (isInput) {
-        const pos = active.selectionStart || 0;
-        active.selectionStart = active.selectionEnd = Math.min(active.value.length, pos + 1);
-      }
+      if (isInput) active.selectionStart = active.selectionEnd = Math.min(active.value.length, (active.selectionStart || 0) + 1);
     } else if (key === 'Space') {
       if (isInput) {
         const start = active.selectionStart || 0;
@@ -406,32 +536,22 @@
         active.dispatchEvent(new Event('input', { bubbles: true }));
       }
     } else {
-      // Regular character
       if (isInput) {
         const start = active.selectionStart || 0;
         active.value = active.value.slice(0, start) + key + active.value.slice(start);
         active.selectionStart = active.selectionEnd = start + 1;
         active.dispatchEvent(new Event('input', { bubbles: true }));
       }
-      // Auto-unshift after typing
-      if (oskShift && key !== '⇧') {
-        oskShift = false;
-        renderOSK();
-      }
+      if (oskShift && key !== '⇧') { oskShift = false; renderOSK(); }
     }
   }
 
   function oskNav(direction) {
     const rows = oskShift ? OSK_ROWS_SHIFT : OSK_ROWS;
     switch (direction) {
-      case 'up':
-        oskFocusRow = Math.max(0, oskFocusRow - 1);
-        break;
-      case 'down':
-        oskFocusRow = Math.min(rows.length - 1, oskFocusRow + 1);
-        break;
+      case 'up': oskFocusRow = Math.max(0, oskFocusRow - 1); break;
+      case 'down': oskFocusRow = Math.min(rows.length - 1, oskFocusRow + 1); break;
       case 'left':
-        // Skip empty keys
         do { oskFocusCol = Math.max(0, oskFocusCol - 1); }
         while (oskFocusCol > 0 && rows[oskFocusRow][oskFocusCol] === '');
         break;
@@ -440,9 +560,7 @@
         while (oskFocusCol < rows[oskFocusRow].length - 1 && rows[oskFocusRow][oskFocusCol] === '');
         break;
     }
-    // Clamp col to row length
     if (oskFocusCol >= rows[oskFocusRow].length) oskFocusCol = rows[oskFocusRow].length - 1;
-    // Skip empty
     while (oskFocusCol >= 0 && rows[oskFocusRow][oskFocusCol] === '') oskFocusCol--;
     if (oskFocusCol < 0) oskFocusCol = 0;
     renderOSK();
@@ -452,11 +570,7 @@
     createOSK();
     oskOpen = !oskOpen;
     oskEl.style.display = oskOpen ? 'flex' : 'none';
-    if (oskOpen) {
-      oskFocusRow = 1;
-      oskFocusCol = 4;
-      renderOSK();
-    }
+    if (oskOpen) { oskFocusRow = 1; oskFocusCol = 4; renderOSK(); }
   }
 
   // ── D-pad Repeat ──────────────────────────────────────────────────────
@@ -476,142 +590,122 @@
     }
   }
 
-  // ── Main Loop ─────────────────────────────────────────────────────────
-  function gameLoop(timestamp) {
-    requestAnimationFrame(gameLoop);
-
-    if (disabled || shouldDisable()) return;
-
-    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-    let gp = null;
-    for (const g of gamepads) {
-      if (g && g.connected && g.buttons.length > 0) { gp = g; break; }
-    }
-    if (!gp) {
-      if (gamepadActive) {
-        gamepadActive = false;
-        updateFocusRing(null);
-      }
-      return;
-    }
-
-    gamepadActive = true;
-    const dt = lastTimestamp ? (timestamp - lastTimestamp) / 1000 : 0.016;
-    lastTimestamp = timestamp;
-
-    const buttons = gp.buttons.map(b => b.pressed);
-    const axes = gp.axes;
-
-    // ── Button events (edge detection) ──────────────────────────────
-    function justPressed(idx) {
-      return idx < buttons.length && buttons[idx] && (idx >= prevButtons.length || !prevButtons[idx]);
-    }
-    function justReleased(idx) {
-      return idx < prevButtons.length && prevButtons[idx] && (idx >= buttons.length || !buttons[idx]);
-    }
-
-    // A = click
-    if (justPressed(BTN.A)) activateFocused();
-
-    // B = back/close
-    if (justPressed(BTN.B)) goBack();
-
-    // L1 = browser back
-    if (justPressed(BTN.L1)) history.back();
-
-    // R1 = browser forward
-    if (justPressed(BTN.R1)) history.forward();
-
-    // Start = toggle OSK
-    if (justPressed(BTN.START)) toggleOSK();
-
-    // ── D-pad with repeat ───────────────────────────────────────────
-    const dirs = [
-      { btn: BTN.UP, dir: 'up' },
-      { btn: BTN.DOWN, dir: 'down' },
-      { btn: BTN.LEFT, dir: 'left' },
-      { btn: BTN.RIGHT, dir: 'right' },
-    ];
-    for (const { btn, dir } of dirs) {
-      if (justPressed(btn)) {
-        const action = oskOpen ? () => oskNav(dir) : () => spatialNav(dir);
-        startRepeat(dir, action);
-      }
-      if (justReleased(btn)) {
-        stopRepeat(dir);
-      }
-    }
-
-    // D-pad A on OSK
-    if (oskOpen && justPressed(BTN.A)) {
-      pressOSKKey(oskFocusRow, oskFocusCol);
-    }
-
-    // ── Left stick → cursor ─────────────────────────────────────────
-    if (settings.stickCursorEnabled && axes.length >= 2) {
-      const lx = Math.abs(axes[0]) > settings.deadZone ? axes[0] : 0;
-      const ly = Math.abs(axes[1]) > settings.deadZone ? axes[1] : 0;
-      if (lx !== 0 || ly !== 0) {
-        moveCursor(lx * settings.cursorSpeed * dt, ly * settings.cursorSpeed * dt);
-      }
-    }
-
-    // ── Right stick → scroll ────────────────────────────────────────
-    if (axes.length >= 4) {
-      const rx = Math.abs(axes[2]) > settings.deadZone ? axes[2] : 0;
-      const ry = Math.abs(axes[3]) > settings.deadZone ? axes[3] : 0;
-      if (rx !== 0 || ry !== 0) {
-        scrollPage(rx * settings.scrollSpeed * dt, ry * settings.scrollSpeed * dt);
-      }
-    }
-
-    // Save previous state
-    prevButtons = buttons.slice();
+  // ── Focus ring position sync (keeps ring aligned after scroll) ─────
+  function syncFocusRing() {
+    if (!focusRingEl || !focusedEl) return;
+    if (focusRingEl.style.opacity === '0') return;
+    const rect = focusedEl.getBoundingClientRect();
+    // Element scrolled off-screen or hidden
+    if (rect.width === 0 || rect.height === 0) { focusRingEl.style.opacity = '0'; return; }
+    const pad = 3;
+    focusRingEl.style.left = (rect.left - pad) + 'px';
+    focusRingEl.style.top = (rect.top - pad) + 'px';
+    focusRingEl.style.width = (rect.width + pad * 2) + 'px';
+    focusRingEl.style.height = (rect.height + pad * 2) + 'px';
   }
 
-  // ── CSS Injection ─────────────────────────────────────────────────────
+  // ── Auto-hide mouse cursor ─────────────────────────────────────────
+  let mouseHideTimer = null;
+  function initMouseAutoHide() {
+    function showMouse() {
+      document.body.classList.remove('hide-cursor');
+      clearTimeout(mouseHideTimer);
+      mouseHideTimer = setTimeout(() => {
+        document.body.classList.add('hide-cursor');
+      }, 5000);
+    }
+    document.addEventListener('mousemove', showMouse);
+    document.addEventListener('mousedown', showMouse);
+    // Start hidden after 5s
+    mouseHideTimer = setTimeout(() => {
+      document.body.classList.add('hide-cursor');
+    }, 5000);
+  }
+
+  // ── CSS ───────────────────────────────────────────────────────────────
   function injectStyles() {
     if (document.getElementById('gamepad-nav-styles')) return;
     const style = document.createElement('style');
     style.id = 'gamepad-nav-styles';
-    style.textContent = `
-      #gamepad-cursor { will-change: left, top, opacity; }
-      #gamepad-focus-ring { will-change: left, top, width, height, opacity; }
-      #gamepad-osk * { box-sizing: border-box; font-family: -apple-system, system-ui, sans-serif; }
-    `;
+    style.textContent = '#gamepad-cursor{will-change:left,top,opacity}#gamepad-focus-ring{will-change:left,top,width,height,opacity}#gamepad-osk *{box-sizing:border-box;font-family:-apple-system,system-ui,sans-serif}body.hide-cursor,body.hide-cursor *{cursor:none!important}';
     document.head.appendChild(style);
   }
+
+  // ── Custom Confirm Dialog (gamepad-navigable) ─────────────────────────
+  let confirmEl = null;
+  let confirmResolve = null;
+  let confirmFocus = 0; // 0=cancel, 1=ok
+
+  function createConfirmEl() {
+    if (confirmEl) return;
+    confirmEl = document.createElement('div');
+    confirmEl.id = 'gamepad-confirm';
+    confirmEl.style.cssText = 'position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,0.7);display:none;align-items:center;justify-content:center;';
+    confirmEl.innerHTML = '<div style="background:#1a1a1a;border:1px solid #333;border-radius:12px;padding:24px;max-width:360px;width:90%;text-align:center">' +
+      '<div id="gp-confirm-msg" style="color:#e0e0e0;font-size:14px;margin-bottom:20px;white-space:pre-wrap;font-family:-apple-system,system-ui,sans-serif"></div>' +
+      '<div style="display:flex;gap:10px;justify-content:center">' +
+      '<button id="gp-confirm-cancel" style="flex:1;padding:10px;background:#333;border:2px solid #444;border-radius:8px;color:#aaa;font-size:13px;font-weight:600;cursor:pointer">Cancel</button>' +
+      '<button id="gp-confirm-ok" style="flex:1;padding:10px;background:rgba(74,158,255,0.15);border:2px solid #4a9eff;border-radius:8px;color:#4a9eff;font-size:13px;font-weight:600;cursor:pointer">OK</button>' +
+      '</div></div>';
+    document.body.appendChild(confirmEl);
+    confirmEl.querySelector('#gp-confirm-cancel').onclick = () => resolveConfirm(false);
+    confirmEl.querySelector('#gp-confirm-ok').onclick = () => resolveConfirm(true);
+  }
+
+  function resolveConfirm(result) {
+    if (confirmEl) confirmEl.style.display = 'none';
+    if (confirmResolve) { confirmResolve(result); confirmResolve = null; }
+  }
+
+  function gamepadConfirm(message) {
+    createConfirmEl();
+    confirmEl.querySelector('#gp-confirm-msg').textContent = message;
+    confirmEl.style.display = 'flex';
+    confirmFocus = 1; // default to OK
+    updateConfirmFocus();
+    return new Promise(resolve => { confirmResolve = resolve; });
+  }
+
+  function updateConfirmFocus() {
+    if (!confirmEl) return;
+    const cancel = confirmEl.querySelector('#gp-confirm-cancel');
+    const ok = confirmEl.querySelector('#gp-confirm-ok');
+    cancel.style.borderColor = confirmFocus === 0 ? '#4a9eff' : '#444';
+    cancel.style.boxShadow = confirmFocus === 0 ? '0 0 8px rgba(74,158,255,0.4)' : 'none';
+    ok.style.borderColor = confirmFocus === 1 ? '#4a9eff' : '#4a9eff';
+    ok.style.boxShadow = confirmFocus === 1 ? '0 0 8px rgba(74,158,255,0.4)' : 'none';
+    ok.style.opacity = confirmFocus === 1 ? '1' : '0.5';
+    cancel.style.opacity = confirmFocus === 0 ? '1' : '0.5';
+  }
+
+  function isConfirmOpen() {
+    return confirmEl && confirmEl.style.display === 'flex';
+  }
+
+  // Expose gamepadConfirm globally for app-specific usage
+  window.gamepadConfirm = gamepadConfirm;
 
   // ── Public API ────────────────────────────────────────────────────────
   window.GamepadNav = {
     getSettings: () => ({ ...settings }),
     setSettings: (patch) => { settings = { ...settings, ...patch }; updateCursorStyle(); updateOSKStyle(); saveSettings(settings); },
     resetSettings: () => { settings = { ...DEFAULTS }; updateCursorStyle(); updateOSKStyle(); saveSettings(settings); },
-    getState: () => {
-      const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-      const result = [];
-      for (const gp of gamepads) {
-        if (!gp || !gp.connected) continue;
-        result.push({
-          id: gp.id,
-          index: gp.index,
-          buttons: gp.buttons.map(b => ({ pressed: b.pressed, value: b.value })),
-          axes: Array.from(gp.axes),
-        });
-      }
-      return result;
-    },
+    getState: () => latestControllers,
     isActive: () => gamepadActive,
     disable: () => { disabled = true; },
     enable: () => { disabled = false; },
-    toggleOSK: () => toggleOSK(),
+    toggleOSK,
   };
 
   // ── Init ──────────────────────────────────────────────────────────────
   function init() {
     injectStyles();
     loadSettings();
-    requestAnimationFrame(gameLoop);
+    connectWS();
+    initMouseAutoHide();
+    // Keep focus ring aligned during any scroll
+    window.addEventListener('scroll', syncFocusRing, { passive: true });
+    document.addEventListener('scroll', syncFocusRing, { passive: true, capture: true });
   }
 
   if (document.readyState === 'loading') {

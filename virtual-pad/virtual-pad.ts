@@ -1632,6 +1632,7 @@ const VIEW_HTML = `<!DOCTYPE html>
   .debug-frame-body.landscape { aspect-ratio: 16/9; }
   .debug-frame-body iframe { width: 200%; height: 200%; border: none; transform: scale(0.5); transform-origin: top left; background: #0f0f0f; }
 </style>
+<script src="http://127.0.0.1/gamepad-nav.js"></script>
 </head>
 <body>
 <div class="container">

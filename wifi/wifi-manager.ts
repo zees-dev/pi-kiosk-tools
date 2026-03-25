@@ -695,6 +695,7 @@ const indexHtml = `<!DOCTYPE html>
       button { width: 100%; }
     }
   </style>
+<script src="http://127.0.0.1/gamepad-nav.js"></script>
 </head>
 <body>
   <div class="container">
@@ -1001,7 +1002,7 @@ const indexHtml = `<!DOCTYPE html>
     }
 
     async function forgetNetwork(name) {
-      if (!confirm('Forget "' + name + '"? You\\'ll need to re-enter the password to connect again.')) return;
+      const ok = window.gamepadConfirm ? await window.gamepadConfirm('Forget "' + name + '"?') : confirm('Forget "' + name + '"?'); if (!ok) return;
 
       const el = event?.target?.closest('.network');
       if (el) { el.style.opacity = '0.3'; el.style.pointerEvents = 'none'; }
