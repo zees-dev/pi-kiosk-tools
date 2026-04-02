@@ -394,6 +394,98 @@ function getLanIp(): string {
 // ── Kiosk Mode ──────────────────────────────────────────────────────────────
 
 const MODE_FILE = "/var/cache/kiosk-home/kiosk-mode";
+const MOONLIGHT_LOG_DIR = "/var/log/kiosk";
+
+function getMoonlightStatus() {
+  const mode = getKioskMode();
+  const isRunning = mode === 'moonlight';
+  if (!isRunning) return { running: false };
+
+  // Find latest moonlight log
+  try {
+    const files = readdirSync(MOONLIGHT_LOG_DIR)
+      .filter(f => f.startsWith('moonlight-') && f.endsWith('.log'))
+      .sort().reverse();
+    if (!files.length) return { running: true, log: null };
+
+    const logPath = MOONLIGHT_LOG_DIR + '/' + files[0];
+    const log = readFileSync(logPath, 'utf-8');
+    const lines = log.split('\n');
+
+    // Parse metadata from log
+    const info: Record<string, any> = { running: true };
+
+    // Decoder type
+    const hwLine = lines.find(l => l.includes('Hwaccel V4L2'));
+    if (hwLine) {
+      info.decoder = 'V4L2 HEVC (hardware)';
+      const m = hwLine.match(/devices: ([^;]+)/);
+      if (m) info.v4l2Devices = m[1];
+      const fmt = hwLine.match(/swfmt=(\S+)/);
+      if (fmt) info.pixelFormat = fmt[1];
+    } else if (lines.some(l => l.includes('FFmpeg-based video decoder'))) {
+      info.decoder = lines.some(l => l.includes('hevc')) ? 'HEVC (software)' : 'H.264 (software)';
+    }
+
+    // Renderer
+    const rendLine = lines.find(l => l.includes('Using DRM renderer'));
+    info.renderer = rendLine ? 'DRM (direct)' : lines.find(l => l.includes('Using SDL renderer')) ? 'SDL (software)' : 'unknown';
+
+    // Resolution from last ff_v4l2_request_init (stream may renegotiate)
+    const v4l2InitLines = lines.filter(l => l.includes('ff_v4l2_request_init'));
+    if (v4l2InitLines.length) {
+      const last = v4l2InitLines[v4l2InitLines.length - 1];
+      const m = last.match(/(\d{3,4})x(\d{3,4})/);
+      if (m) info.resolution = m[1] + 'x' + m[2];
+    } else {
+      const resLine = lines.find(l => l.includes('Dropping window event'));
+      const resMatch = resLine?.match(/(\d{3,4})\s+(\d{3,4})/);
+      if (resMatch) info.resolution = resMatch[1] + 'x' + resMatch[2];
+    }
+
+    const fpsLine = lines.find(l => l.includes('FPS stream'));
+    const fpsMatch = fpsLine?.match(/(\d+)\s+FPS/);
+    if (fpsMatch) info.fps = parseInt(fpsMatch[1]);
+
+    // Codec
+    info.codec = lines.some(l => l.includes('[hevc')) ? 'HEVC' : lines.some(l => l.includes('[h264')) ? 'H.264' : 'unknown';
+
+    // Host
+    const hostLine = lines.find(l => l.includes('mDNS host'));
+    const hostMatch = hostLine?.match(/"([^"]+)"/);
+    if (hostMatch) info.host = hostMatch[1].replace(/\.$/, '');
+
+    // GPU driver
+    const gpuLine = lines.find(l => l.includes('GPU driver:'));
+    if (gpuLine) info.gpu = gpuLine.split('GPU driver:')[1].trim();
+
+    // First packet latency
+    const pktLine = lines.find(l => l.includes('Received first video packet'));
+    const pktMatch = pktLine?.match(/(\d+)\s+ms/);
+    if (pktMatch) info.firstPacketMs = parseInt(pktMatch[1]);
+
+    // EGL format
+    const eglLine = lines.find(l => l.includes('EGLImage pixel format'));
+    if (eglLine) info.eglFormat = eglLine.split('format:')[1].trim();
+
+    // CPU usage from ps
+    try {
+      const ps = execSync("ps aux | grep 'moonlight stream' | grep -v grep | awk '{print $3,$4,$10}'", { timeout: 2000 }).toString().trim();
+      if (ps) {
+        const parts = ps.trim().split(/\s+/);
+        if (parts.length >= 3) {
+          info.cpu = parseFloat(parts[0]);
+          info.mem = parseFloat(parts[1]);
+          info.uptime = parts[2];
+        }
+      }
+    } catch {}
+
+    return info;
+  } catch {
+    return { running: true };
+  }
+}
 
 function getKioskMode(): string {
   try { return readFileSync(MODE_FILE, "utf-8").trim(); } catch { return "retrobox"; }
@@ -427,7 +519,7 @@ function getApps(): App[] {
     { id: "spaghettikart", name: "Spaghetti Kart", icon: "🍝", url: `http://${ip}:3462`, description: "Mario Kart 64 PC port", section: "games" },
   ];
 
-  apps.push({ id: "moonlight", name: "Moonlight", icon: "🌙", url: "", description: "Stream from MacBook Pro", section: "games" });
+  apps.push({ id: "moonlight", name: "Moonlight", icon: "🌙", url: "", description: "Stream from MacBook Pro", diagnosticsUrl: `/api/moonlight-status`, section: "games" });
 
   apps.push(
     // Apps
@@ -1733,6 +1825,23 @@ function formatDiag(app, diag) {
     if (!pills.length) return '<div class="diag"><div class="diag-line diag-off">No controllers</div></div>';
     return '<div class="diag"><div style="display:flex;flex-wrap:wrap;gap:3px;justify-content:flex-end">' + pills.join('') + '</div></div>';
   }
+  if (app.id === 'moonlight') {
+    if (!diag || !diag.running) return '<div class="diag"><div class="diag-line diag-off">Stopped</div></div>';
+    const isHw = diag.decoder?.includes('hardware');
+    const decoderCls = isHw ? 'diag-ok' : 'diag-warn';
+    const decoderLabel = isHw ? 'HW HEVC' : (diag.decoder || 'Software');
+    const res = (diag.resolution || '?') + (diag.fps ? ' @ ' + diag.fps + 'fps' : '');
+    const host = diag.host ? diag.host.replace('.local', '') : '?';
+    const stats = [];
+    if (diag.cpu != null) stats.push('CPU ' + diag.cpu.toFixed(1) + '%');
+    if (diag.uptime) stats.push(diag.uptime);
+    return '<div class="diag">'
+      + '<div class="diag-line"><span class="' + decoderCls + '">' + decoderLabel + '</span></div>'
+      + '<div class="diag-line">' + res + '</div>'
+      + '<div class="diag-line">' + host + '</div>'
+      + (stats.length ? '<div class="diag-line">' + stats.join(' · ') + '</div>' : '')
+      + '</div>';
+  }
   if (app.id === 'vnc') {
     if (!diag.active) return '<div class="diag"><div class="diag-line diag-off">Service disabled</div></div>';
     return '<div class="diag"><div class="diag-line diag-ok">Running</div><div class="diag-line">' + (diag.nativeAddr || '') + '</div></div>';
@@ -1754,7 +1863,7 @@ function renderApps(kioskUrl) {
     const svcInfo = svcName && window._serviceMap ? window._serviceMap[svcName] : null;
     const isDisabled = svcInfo ? !svcInfo.active : false;
     card.className = 'app-card' + (isActive ? ' active' : '') + (isMoonlightRunning ? ' active' : '') + (isDisabled ? ' disabled' : '');
-    const diagHtml = isMoonlight ? '' : formatDiag(app, diagCache[app.id]);
+    const diagHtml = formatDiag(app, diagCache[app.id]);
     let ctrlHtml = '';
     if (!isDisabled && app.id === 'retrobox') ctrlHtml = '<a class="open-link" href="https://' + location.hostname + ':3334/controller.html?screen=127-0-0-1" target="_blank" title="Controller" onclick="event.stopPropagation()">⊞</a>';
     if (!isDisabled && app.id === 'virtualpad') ctrlHtml = '<a class="open-link" href="https://' + location.hostname + ':3461/" target="_blank" title="Open controller" onclick="event.stopPropagation()">🎮</a>';
@@ -1811,7 +1920,7 @@ async function handleMoonlightAction(action) {
     });
     const data = await resp.json();
     if (data.ok) {
-      showToast(isStart ? 'Moonlight streaming started' : 'Returned to RetroBox');
+      showToast(isStart ? 'Moonlight streaming started' : 'Moonlight stopped');
       setTimeout(() => { loadApps().then(() => loadStatus()); }, 3000);
     } else {
       showToast(data.error || 'Failed', 'error');
@@ -3213,6 +3322,10 @@ const server = serve({
     // API: kiosk mode (moonlight / retrobox)
     if (path === "/api/kiosk-mode" && req.method === "GET") {
       return Response.json({ mode: getKioskMode() });
+    }
+
+    if (path === "/api/moonlight-status" && req.method === "GET") {
+      return Response.json(getMoonlightStatus());
     }
 
     if (path === "/api/kiosk-mode" && req.method === "POST") {

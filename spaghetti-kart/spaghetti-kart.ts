@@ -237,6 +237,9 @@ async function launchGame(): Promise<{ ok: boolean; error?: string }> {
       `HOME=/var/cache/kiosk-home`,
       `SDL_VIDEODRIVER=wayland`,
       `WLR_NO_HARDWARE_CURSORS=1`,
+      `XCURSOR_SIZE=1`,
+      `XCURSOR_THEME=transparent`,
+      `XCURSOR_PATH=/var/cache/kiosk-home/.icons`,
       CAGE_BIN, ...cageArgs
     ], {
       cwd: GAME_DIR,
@@ -248,6 +251,12 @@ async function launchGame(): Promise<{ ok: boolean; error?: string }> {
     gamePid = proc.pid;
     gameRunning = true;
     lastLaunchTime = Date.now();
+
+    // After Cage starts: apply saved resolution + park cursor
+    setTimeout(async () => {
+      try { await fetch("http://127.0.0.1/api/display/apply-saved", { method: "POST", signal: AbortSignal.timeout(3000) }); } catch {}
+      try { execSync("ydotool mousemove -- 10000 10000", { timeout: 2000, env: { ...process.env, YDOTOOL_SOCKET: "/run/ydotoold/socket" } }); } catch {}
+    }, 3000);
 
     proc.exited.then(() => {
       gameRunning = false;

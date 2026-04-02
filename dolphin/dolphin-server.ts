@@ -150,6 +150,8 @@ function applySnapshot(snap: Record<string, string>): void {
     "dolphin.syncGpuOnSkipIdle": { file: "Dolphin.ini", section: "Core", key: "SyncGPUOnSkipIdleHack" },
     "dolphin.audioStretching": { file: "Dolphin.ini", section: "Core", key: "AudioStretch" },
     "dolphin.emulationSpeed": { file: "Dolphin.ini", section: "Core", key: "EmulationSpeed" },
+    "dolphin.slotA": { file: "Dolphin.ini", section: "Core", key: "SlotA" },
+    "dolphin.bba": { file: "Dolphin.ini", section: "Core", key: "BBA" },
   };
   const changes: { file: string; section: string; key: string; value: string }[] = [];
   for (const [k, v] of Object.entries(snap)) {
@@ -1253,6 +1255,9 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
       LIBSEAT_BACKEND: "seatd",
       WLR_RENDERER: "gles2",
       WLR_NO_HARDWARE_CURSORS: "1",
+      XCURSOR_SIZE: "1",
+      XCURSOR_THEME: "transparent",
+      XCURSOR_PATH: "/var/cache/kiosk-home/.icons",
       HOME: "/var/cache/kiosk-home",
       PULSE_SERVER: "/run/user/1001/pulse/native",
       PATH: "/run/wrappers/bin:/run/current-system/sw/bin",
@@ -1269,6 +1274,20 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
     currentState = romPath ? "running" : "dolphin-ui";
     currentRom = romPath ? basename(romPath) : "";
     if (romPath) recordPlay(basename(romPath));
+
+    // After Cage starts: apply saved resolution + park cursor
+    setTimeout(async () => {
+      try {
+        // Apply saved resolution from dashboard
+        await fetch("http://127.0.0.1/api/display/apply-saved", { method: "POST", signal: AbortSignal.timeout(3000) });
+        console.log("🐬 Applied saved display resolution");
+      } catch {}
+      try {
+        // Park cursor off-screen
+        execSync("ydotool mousemove -- 10000 10000", { timeout: 2000, env: { ...process.env, YDOTOOL_SOCKET: "/run/ydotoold/socket" } });
+        console.log("🐬 Cursor parked");
+      } catch {}
+    }, 3000);
 
     // Log output
     const readStream = (stream: ReadableStream<Uint8Array> | null, prefix: string) => {
@@ -2194,6 +2213,9 @@ function renderSettings() {
   html += settingToggle('Audio Stretching', 'dolphin.audioStretching', s.dolphin.audioStretching === 'True', 'Stretch audio to prevent crackling when slow');
   html += settingSlider('Speed Limit', 'dolphin.emulationSpeed', parseFloat(s.dolphin.emulationSpeed) || 1.0, 0.0, 2.0, 0.1);
 
+  html += '<div style="font-size:11px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;margin-top:16px">🌐 Network</div>';
+  html += settingToggle('Broadband Adapter (LAN)', 'dolphin.slotA', s.dolphin.slotA === '10', 'Enable BBA in Slot A for LAN multiplayer (MKDD, Kirby Air Ride, etc.)');
+
   $('settingsForm').innerHTML = html;
 
   // Store initial values for dirty tracking
@@ -2260,6 +2282,7 @@ const DOLPHIN_DEFAULTS = {
   'dolphin.syncGpuOnSkipIdle': true, 'dolphin.fastmem': true,
   'dolphin.mmu': false, 'dolphin.fprf': false,
   'dolphin.audioStretching': true, 'dolphin.emulationSpeed': '1.0',
+  'dolphin.slotA': '10',
 };
 
 // Built-in profiles (not deletable)
@@ -2358,6 +2381,7 @@ async function saveSettings() {
     'dolphin.fprf': { file: 'Dolphin.ini', section: 'Core', key: 'FPRF', toggle: true },
     'dolphin.audioStretching': { file: 'Dolphin.ini', section: 'Core', key: 'AudioStretch', toggle: true },
     'dolphin.emulationSpeed': { file: 'Dolphin.ini', section: 'Core', key: 'EmulationSpeed', slider: true },
+    'dolphin.slotA': { file: 'Dolphin.ini', section: 'Core', key: 'SlotA', bba: true },
   };
 
   document.querySelectorAll('[data-key]').forEach(el => {
@@ -2365,7 +2389,11 @@ async function saveSettings() {
     const m = mapping[key];
     if (!m) return;
     let value;
-    if (m.toggle) {
+    if (m.bba) {
+      value = el.checked ? '10' : '255';
+      // Also set BBA type when enabling
+      changes.push({ file: 'Dolphin.ini', section: 'Core', key: 'BBA', value: el.checked ? 'Builtin' : 'Builtin' });
+    } else if (m.toggle) {
       value = el.checked ? 'True' : 'False';
     } else if (m.slider) {
       value = parseFloat(el.value).toFixed(1);
