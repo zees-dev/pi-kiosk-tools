@@ -240,7 +240,7 @@ function getSystemDiagnostics() {
   }
 
   // Listening ports
-  let ports: { port: number; proto: string; process: string; pid: number }[] = [];
+  let ports: { port: number; proto: string; process: string; pid: number; script: string }[] = [];
   try {
     const ssRaw = run("/run/current-system/sw/bin/ss -tlnp 2>/dev/null");
     for (const line of ssRaw.split("\n").slice(1)) {
@@ -255,9 +255,32 @@ function getSystemDiagnostics() {
       const pidMatch = procInfo.match(/pid=(\d+)/);
       const proc = nameMatch ? nameMatch[1] : "unknown";
       const pid = pidMatch ? parseInt(pidMatch[1]) : 0;
+      // Resolve script/program from cmdline
+      let script = "";
+      if (pid) {
+        try {
+          const cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf-8").split("\0").filter(Boolean);
+          const runtime = cmdline[0]?.split("/").pop() || "";
+          if (["bun", "node", "python", "python3", "deno"].includes(runtime)) {
+            const scriptArg = cmdline.slice(1).find(a => !a.startsWith("-") && (a.endsWith(".ts") || a.endsWith(".js") || a.endsWith(".py") || a.endsWith(".mjs")));
+            if (scriptArg) {
+              let fullPath = scriptArg;
+              if (!scriptArg.startsWith("/")) {
+                try {
+                  const cwd = readFileSync(`/proc/${pid}/cwd`, "utf-8").replace(/\0/g, "") || run(`readlink /proc/${pid}/cwd`).trim();
+                  if (cwd) fullPath = cwd + "/" + scriptArg;
+                } catch {
+                  try { fullPath = run(`readlink /proc/${pid}/cwd`).trim() + "/" + scriptArg; } catch {}
+                }
+              }
+              script = fullPath.replace(/^\/home\/pi\//, "~/");
+            }
+          }
+        } catch {}
+      }
       // Deduplicate (IPv4 + IPv6 both show)
       if (!ports.some(p => p.port === port && p.process === proc)) {
-        ports.push({ port, proto: "tcp", process: proc, pid });
+        ports.push({ port, proto: "tcp", process: proc, pid, script });
       }
     }
     ports.sort((a, b) => a.port - b.port);
@@ -1409,7 +1432,7 @@ let lastProcsJson = '';
 function buildPortRows(ports, filter, collapsed) {
   const preview = 5;
   const selfProcs = ['kiosk-dashboa', 'openclaw'];
-  const filtered = ports.filter(p => !filter || fuzzyMatch(filter, p.process + ':' + p.port + ' ' + p.pid));
+  const filtered = ports.filter(p => !filter || fuzzyMatch(filter, p.process + ':' + p.port + ' ' + p.pid + ' ' + (p.script || '')));
   const visible = collapsed ? filtered.slice(0, preview) : filtered;
   const hasMore = collapsed && filtered.length > preview;
 
@@ -1418,10 +1441,14 @@ function buildPortRows(ports, filter, collapsed) {
     const isEmu = p.proto === 'emu';
     const portLabel = isEmu ? '🐬' : ':' + p.port;
     const portColor = isEmu ? '#9b59b6' : (isSelf ? '#c47070' : '#4CAF50');
-    return '<div class="svc-row' + (isSelf ? ' self' : '') + '">' +
-      '<span class="svc-dot-lg up"></span>' +
-      '<span class="svc-name" style="flex:0 0 55px;color:' + portColor + ';font-family:monospace">' + portLabel + '</span>' +
-      '<span class="svc-name" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + escHtml(p.process) + (p.pid ? ' <span style="color:#555;font-size:11px">(' + p.pid + ')</span>' : '') + '</span>' +
+    const scriptHtml = p.script ? '<span style="color:#888;font-size:11px;margin-left:4px;font-family:monospace">' + escHtml(p.script) + '</span>' : '';
+    return '<div class="proc-row">' +
+      '<div class="proc-scroll" style="gap:8px">' +
+      '<span class="svc-dot-lg up" style="flex-shrink:0"></span>' +
+      '<span style="flex:0 0 55px;color:' + portColor + ';font-family:monospace;font-size:13px;font-weight:500">' + portLabel + '</span>' +
+      '<span style="flex:0 0 auto;white-space:nowrap;font-size:13px;font-weight:500' + (isSelf ? ';color:#c47070' : '') + '">' + escHtml(p.process) + (p.pid ? ' <span style="color:#555;font-size:11px">(' + p.pid + ')</span>' : '') + '</span>' +
+      '<span style="flex:0 0 auto;white-space:nowrap">' + scriptHtml + '</span>' +
+      '</div>' +
       (isEmu
         ? '<button class="svc-stop-btn port-kill" data-action="stop-dolphin" title="Force stop Dolphin">✕</button>'
         : (p.pid ? '<button class="svc-stop-btn port-kill" data-pid="' + p.pid + '" title="Kill process">✕</button>' : '')) +
