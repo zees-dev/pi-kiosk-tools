@@ -998,12 +998,16 @@ function generateGCPadConfig(): void {
   // Dolphin evdev buttons: NamedButton strips BTN_/KEY_ prefix → "SOUTH", "EAST", etc.
   // Dolphin evdev axes: Sequential index "Axis N+/-" (NOT raw ABS codes).
   const lines: string[] = [];
+  const wiiLines: string[] = [];
+  const nameCount: Record<string, number> = {}; // track per-name index for evdev
   for (let i = 0; i < Math.min(gamepads.length, 4); i++) {
     const gp = gamepads[i];
     const ax = getAxisMapping(gp.eventHandler);
+    const evdevIdx = nameCount[gp.name] || 0;
+    nameCount[gp.name] = evdevIdx + 1;
 
     lines.push(`[GCPad${i + 1}]`);
-    lines.push(`Device = evdev/${i}/${gp.name}`);
+    lines.push(`Device = evdev/${evdevIdx}/${gp.name}`);
     // GC A = East face button, GC B = South, GC X = North, GC Y = West
     lines.push(`Buttons/A = \`EAST\``);
     lines.push(`Buttons/B = \`SOUTH\``);
@@ -1037,9 +1041,10 @@ function generateGCPadConfig(): void {
 
   // Add virtual gamepads for remaining slots when enabled
   const hwCount = Math.min(gamepads.length, 4);
+  let vpadNum = 1; // Virtual Gamepad devices are numbered sequentially from 1
   if (virtualPadsEnabled && hwCount < 4) {
     for (let i = hwCount; i < 4; i++) {
-      const devName = `Virtual Gamepad ${i + 1}`;
+      const devName = `Virtual Gamepad ${vpadNum++}`;
       lines.push(`[GCPad${i + 1}]`);
       lines.push(`Device = evdev/0/${devName}`);
       lines.push(`Buttons/A = \`EAST\``);
@@ -1125,13 +1130,15 @@ function generateGCPadConfig(): void {
   }
 
   // Also generate WiimoteNew.ini for Wii games (emulated Wiimote + Nunchuk)
-  const wiiLines: string[] = [];
+  const wiiNameCount: Record<string, number> = {};
   for (let i = 0; i < Math.min(gamepads.length, 4); i++) {
     const gp = gamepads[i];
     const ax = getAxisMapping(gp.eventHandler);
+    const wiiEvdevIdx = wiiNameCount[gp.name] || 0;
+    wiiNameCount[gp.name] = wiiEvdevIdx + 1;
 
     wiiLines.push(`[Wiimote${i + 1}]`);
-    wiiLines.push(`Device = evdev/${i}/${gp.name}`);
+    wiiLines.push(`Device = evdev/${wiiEvdevIdx}/${gp.name}`);
     // Wiimote buttons
     wiiLines.push(`Buttons/A = \`SOUTH\``);
     wiiLines.push(`Buttons/B = \`EAST\``);
@@ -1211,21 +1218,11 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
       // Global Hub handles all controller routing — just generate Virtual Gamepad configs
       generateVirtualPadConfig();
       console.log("[input] Global Controller Hub active — using Virtual Gamepad configs");
-    } else if (hotplugMode) {
-      generateVirtualPadConfig();
-      // Enable hw→uinput forwarding on virtual-pad server
-      try {
-        await fetch("https://127.0.0.1:3461/api/hw-forwarding", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ enabled: true }),
-          tls: { rejectUnauthorized: false },
-        });
-      } catch (e: any) {
-        console.log("[input] Warning: could not enable hw forwarding on virtual-pad:", e.message);
-      }
     } else {
+      // Use real hardware device names for hw controllers + Virtual Gamepads for remaining slots
+      // Cage/libseat can access BT/USB controllers directly through the seat session
       generateGCPadConfig();
+      console.log("[input] Using hardware + virtual gamepad configs (direct evdev)");
     }
   } catch (e: any) {
     console.log("[input] Failed to generate controller config:", e.message);

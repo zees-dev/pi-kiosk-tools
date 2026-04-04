@@ -1091,14 +1091,15 @@ const net = (() => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(proto + '//' + location.host + '/ws' + (wantP ? '?player=' + wantP : ''));
     ws.binaryType = 'arraybuffer';
+    let kicked = false;
     ws.onopen = () => cbs.state.forEach(f => f('connected'));
-    ws.onclose = () => { cbs.state.forEach(f => f('connecting')); player = null; setTimeout(connect, 1000); };
+    ws.onclose = () => { if (kicked) { cbs.state.forEach(f => f('kicked')); return; } cbs.state.forEach(f => f('connecting')); player = null; setTimeout(connect, 1000); };
     ws.onerror = () => ws.close();
     ws.onmessage = e => {
       if (typeof e.data === 'string') {
         const m = JSON.parse(e.data);
         if (m.type === 'assigned') { player = m.player; cbs.assign.forEach(f => f(player)); }
-        else if (m.type === 'kicked') { player = null; cbs.kick.forEach(f => f()); ws.close(); }
+        else if (m.type === 'kicked') { kicked = true; player = null; cbs.kick.forEach(f => f()); ws.close(); }
       }
     };
   }
@@ -1142,6 +1143,14 @@ badge.addEventListener('click', () => {
 });
 net.onState(s => {
   dot.className = 'conn-dot ' + s;
+  if (s === 'kicked') {
+    badge.textContent = '✕';
+    badge.className = 'player-badge';
+    badge.style.background = '#f4433633';
+    badge.style.color = '#f44336';
+    badge.style.borderColor = '#f4433666';
+    document.body.innerHTML = '<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#0f0f0f;z-index:9999"><div style="text-align:center;color:#888;font-family:system-ui"><div style="font-size:48px;margin-bottom:16px">❌</div><div style="font-size:18px;font-weight:600;color:#f44336;margin-bottom:8px">Disconnected</div><div style="font-size:14px">Refresh to reconnect</div></div></div>';
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -1676,6 +1685,9 @@ const VIEW_HTML = `<!DOCTYPE html>
   .debug-frame-body { width: 100%; aspect-ratio: 9/16; overflow: hidden; background: #0f0f0f; }
   .debug-frame-body.landscape { aspect-ratio: 16/9; }
   .debug-frame-body iframe { width: 200%; height: 200%; border: none; transform: scale(0.5); transform-origin: top left; background: #0f0f0f; }
+  .drop-btn { background: none; border: 1px solid transparent; color: #555; font-size: 12px; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: all 0.15s; flex-shrink: 0; line-height: 1; }
+  .drop-btn:hover { border-color: #f44336; color: #f44336; background: #f4433611; }
+  .drop-btn:active { transform: scale(0.9); }
 </style>
 <script src="http://127.0.0.1/gamepad-nav.js"></script>
 </head>
@@ -1739,6 +1751,16 @@ function updateHubBadge(enabled) {
 // Load initial hub state
 fetch('/api/global-hub').then(r => r.json()).then(d => updateHubBadge(d.enabled)).catch(() => {});
 
+async function dropPlayer(slot) {
+  try {
+    await fetch('/api/drop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slot }),
+    });
+  } catch (e) { console.error('Drop failed:', e); }
+}
+
 // Vendor → full button label set. Add new vendors here.
 const VENDOR_LABELS = {
   0x054c: {0:'✕',1:'○',2:'□',3:'△',4:'L1',5:'R1',6:'L2',7:'R2',8:'SHR',9:'OPT',10:'L3',11:'R3',12:'↑',13:'↓',14:'←',15:'→',16:'PS'},
@@ -1793,6 +1815,7 @@ function renderWebCard(slot, data) {
     '<div class="ctrl-dot"></div>' +
     '<span class="ctrl-name">'+(data.label || 'Web Controller')+'</span>' +
     '<span class="ctrl-type">web</span>' +
+    '<button class="drop-btn" onclick="dropPlayer('+slot+')" title="Disconnect">✕</button>' +
     '</div>' +
     '<div class="ctrl-state">'+renderViz(data.state, data.vendor)+'</div>' +
     '</div>';
@@ -2055,6 +2078,31 @@ const server = Bun.serve({
         } catch (e: any) {
           return Response.json({ ok: false, error: e.message }, { status: 400 });
         }
+      }
+    }
+    if (path === "/api/drop" && req.method === "POST") {
+      try {
+        const body: { slot: number } = await req.json();
+        const idx = body.slot - 1;
+        if (idx < 0 || idx >= slots.length) return Response.json({ ok: false, error: "Invalid slot" }, { status: 400 });
+        const slot = slots[idx];
+        if (!slot.ws) return Response.json({ ok: false, error: "No controller on slot " + body.slot }, { status: 404 });
+        // Send kicked message and close the WebSocket
+        try { slot.ws.send(JSON.stringify({ type: "kicked" })); } catch {}
+        try { slot.ws.close(); } catch {}
+        // Reset state
+        const resetBuf = new ArrayBuffer(10);
+        const rv = new DataView(resetBuf);
+        rv.setUint8(4, 128); rv.setUint8(5, 128); rv.setUint8(6, 128); rv.setUint8(7, 128);
+        processInput(idx, resetBuf);
+        slot.ws = null;
+        slot.lastState = null;
+        setTimeout(() => { if (!slots[idx].ws) stopSlot(idx); }, 500);
+        console.log(`  ✕ Force-dropped Player ${body.slot}`);
+        broadcastDisconnect(idx);
+        return Response.json({ ok: true });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 400 });
       }
     }
     if (path === "/debug") {
