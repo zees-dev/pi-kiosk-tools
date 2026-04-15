@@ -1,7 +1,7 @@
 {
   "mario-kart-wii-usa.nkit.iso": {
-    "lastPlayed": 1772854807682,
-    "playCount": 8
+    "lastPlayed": 1776129697171,
+    "playCount": 9
   },
   "new-super-mario-bros-wii-usa.nkit.iso": {
     "lastPlayed": 1772565506243,
@@ -16,12 +16,12 @@
     "playCount": 1
   },
   "mario-kart-double-dash-extended.iso": {
-    "lastPlayed": 1775271782367,
-    "playCount": 87
+    "lastPlayed": 1776222562691,
+    "playCount": 92
   },
   "bomberman-generation-usa.rvz": {
-    "lastPlayed": 1775266442780,
-    "playCount": 9
+    "lastPlayed": 1775822105888,
+    "playCount": 10
   },
   "super-smash-bros-melee-usa.rvz": {
     "lastPlayed": 1775216590520,
@@ -38,5 +38,9 @@
   "mario-party-7-usa.rvz": {
     "lastPlayed": 1774065696916,
     "playCount": 1
+  },
+  "luigis-mansion-usa.rvz": {
+    "lastPlayed": 1776222432042,
+    "playCount": 5
   }
 }

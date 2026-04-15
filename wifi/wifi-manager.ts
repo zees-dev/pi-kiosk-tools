@@ -11,12 +11,22 @@
 import { serve } from "bun";
 
 const PORT = 3457;
+const SUDO = "/run/wrappers/bin/sudo";
+
+function shQuote(value: string): string {
+  return "\x27" + value.replace(/\x27/g, "\x27\\\x27\x27") + "\x27";
+}
+
 
 // Run a shell command and return stdout
 function run(cmd: string, timeout = 10000): string {
   const { execSync } = require("child_process");
+  const shellCmd =
+    typeof process.getuid === "function" && process.getuid() !== 0
+      ? SUDO + " /bin/sh -lc " + shQuote(cmd)
+      : cmd;
   try {
-    return execSync(cmd, { timeout, encoding: "utf-8", env: { ...process.env, PATH: "/run/current-system/sw/bin:/run/wrappers/bin:" + (process.env.PATH || "") } }).trim();
+    return execSync(shellCmd, { timeout, encoding: "utf-8", env: { ...process.env, PATH: "/run/current-system/sw/bin:/run/wrappers/bin:" + (process.env.PATH || "") } }).trim();
   } catch (e: any) {
     return e.stdout?.toString()?.trim() || "";
   }

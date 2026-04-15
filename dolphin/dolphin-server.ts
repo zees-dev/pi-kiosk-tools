@@ -22,6 +22,7 @@ const DOLPHIN_GUI = "/run/current-system/sw/bin/dolphin-emu";
 const SUDO = "/run/wrappers/bin/sudo";
 const CAGE_BIN = "/run/current-system/sw/bin/cage";
 const ENV_BIN = "/run/current-system/sw/bin/env";
+const DOLPHIN_ALSA_CONFIG = join(DOLPHIN_DIR, "alsa-hdmi.conf");
 const ROM_EXTENSIONS = new Set([".iso", ".gcm", ".gcz", ".ciso", ".wbfs", ".rvz", ".wia", ".dol", ".elf"]);
 
 // ── Hotplug Mode ────────────────────────────────────────────────────────────
@@ -52,6 +53,7 @@ let dolphinProc: Subprocess | null = null;
 let currentRom: string = "";
 let currentState: DolphinState = "idle";
 let lastError: string = "";
+let cleanupScheduled = false;
 
 // ── Play History ────────────────────────────────────────────────────────────
 
@@ -215,7 +217,42 @@ function ensureDirs(): void {
   }
 }
 
+function ensureAudioConfig(): void {
+  const dolphin = readIniFile("Dolphin.ini");
+  const changes: { file: string; section: string; key: string; value: string }[] = [];
+  const alsaConfig = `pcm.!default {
+  type plug
+  slave.pcm {
+    type hw
+    card vc4hdmi0
+    device 0
+  }
+}
+
+ctl.!default {
+  type hw
+  card vc4hdmi0
+}
+`;
+
+  if ((getIniValue(dolphin, "DSP", "Backend") ?? "") !== "ALSA") {
+    changes.push({ file: "Dolphin.ini", section: "DSP", key: "Backend", value: "ALSA" });
+  }
+  if ((getIniValue(dolphin, "DSP", "Volume") ?? "") !== "100") {
+    changes.push({ file: "Dolphin.ini", section: "DSP", key: "Volume", value: "100" });
+  }
+  if (!existsSync(DOLPHIN_ALSA_CONFIG) || readFileSync(DOLPHIN_ALSA_CONFIG, "utf-8") !== alsaConfig) {
+    writeFileSync(DOLPHIN_ALSA_CONFIG, alsaConfig);
+  }
+
+  if (changes.length > 0) {
+    writeSettings(changes);
+    console.log("[audio] Ensured Dolphin audio backend is ALSA");
+  }
+}
+
 ensureDirs();
+ensureAudioConfig();
 
 // ── RetroAchievements (from env vars) ───────────────────────────────────────
 {
@@ -312,50 +349,71 @@ interface SaveEntry {
   mtimeFormatted: string;
 }
 
+function getConfiguredSaveRoots(): string[] {
+  const dolphin = readIniFile("Dolphin.ini");
+  const configuredGciDir = getIniValue(dolphin, "Core", "GCIFolderAPath") || "";
+  const nandRoot = getIniValue(dolphin, "General", "NANDRootPath") || join(DOLPHIN_DIR, "Wii");
+  return [DOLPHIN_DIR, join(DOLPHIN_DIR, "StateSaves"), configuredGciDir, nandRoot].filter(Boolean);
+}
+
+function resolveRequestedSavePath(savePath: string): string | null {
+  const fullPath = savePath.startsWith("/") ? savePath : join(DOLPHIN_DIR, savePath);
+  for (const root of getConfiguredSaveRoots()) {
+    if (fullPath === root || fullPath.startsWith(root + "/")) return fullPath;
+  }
+  return null;
+}
+
 function scanSaves(): SaveEntry[] {
   const saves: SaveEntry[] = [];
+  const dolphin = readIniFile("Dolphin.ini");
+  const configuredGciDir = getIniValue(dolphin, "Core", "GCIFolderAPath") || "";
   const gcDir = join(DOLPHIN_DIR, "GC");
   const stateDir = join(DOLPHIN_DIR, "StateSaves");
 
-  // Scan GCI files: GC/{region}/Card A/*.gci
-  // GCI filename format: {blocks}-{GAMECODE4}-{title}.gci
-  if (existsSync(gcDir)) {
+  const addGciFromDir = (cardDir: string) => {
+    if (!existsSync(cardDir)) return;
+    try {
+      for (const file of readdirSync(cardDir)) {
+        if (!file.endsWith(".gci")) continue;
+        const fullPath = join(cardDir, file);
+        try {
+          const st = statSync(fullPath);
+          if (!st.isFile()) continue;
+          const match = file.match(/^\d+-([A-Z0-9]{4})-/);
+          const gameCode = match ? match[1] : file.slice(0, 4);
+          saves.push({
+            name: file,
+            path: fullPath.startsWith(DOLPHIN_DIR) ? relative(DOLPHIN_DIR, fullPath) : fullPath,
+            fullPath,
+            type: "gci",
+            gameCode,
+            size: st.size,
+            sizeFormatted: formatSize(st.size),
+            mtime: st.mtimeMs,
+            mtimeFormatted: new Date(st.mtimeMs).toLocaleDateString("en-NZ", {
+              day: "numeric", month: "short", year: "numeric",
+              hour: "2-digit", minute: "2-digit",
+            }),
+          });
+        } catch {}
+      }
+    } catch {}
+  };
+
+  // Scan GCI files. Prefer configured GCI Folder path if set, otherwise default GC/{region}/Card A layout.
+  if (configuredGciDir) {
+    addGciFromDir(configuredGciDir);
+  } else if (existsSync(gcDir)) {
     for (const region of readdirSync(gcDir)) {
-      const cardDir = join(gcDir, region, "Card A");
-      if (!existsSync(cardDir)) continue;
-      try {
-        for (const file of readdirSync(cardDir)) {
-          if (!file.endsWith(".gci")) continue;
-          const fullPath = join(cardDir, file);
-          try {
-            const st = statSync(fullPath);
-            if (!st.isFile()) continue;
-            // Parse game code from GCI filename: "64-GM4E-MarioKart Double Dash!!.gci"
-            const match = file.match(/^\d+-([A-Z0-9]{4})-/);
-            const gameCode = match ? match[1] : file.slice(0, 4);
-            saves.push({
-              name: file,
-              path: relative(DOLPHIN_DIR, fullPath),
-              fullPath,
-              type: "gci",
-              gameCode,
-              size: st.size,
-              sizeFormatted: formatSize(st.size),
-              mtime: st.mtimeMs,
-              mtimeFormatted: new Date(st.mtimeMs).toLocaleDateString("en-NZ", {
-                day: "numeric", month: "short", year: "numeric",
-                hour: "2-digit", minute: "2-digit",
-              }),
-            });
-          } catch {}
-        }
-      } catch {}
+      addGciFromDir(join(gcDir, region, "Card A"));
     }
   }
 
   // Scan Wii NAND saves: Wii/title/{upper}/{lower_hex}/data/*
   // lower_hex is the 4-char game ID encoded as ASCII hex (e.g. "SMNE" → "534d4e45")
-  const wiiTitleDir = join(DOLPHIN_DIR, "Wii", "title");
+  const nandRoot = getIniValue(dolphin, "General", "NANDRootPath") || join(DOLPHIN_DIR, "Wii");
+  const wiiTitleDir = join(nandRoot, "title");
   if (existsSync(wiiTitleDir)) {
     try {
       for (const upper of readdirSync(wiiTitleDir)) {
@@ -382,7 +440,7 @@ function scanSaves(): SaveEntry[] {
                 if (!st.isFile()) continue;
                 saves.push({
                   name: file,
-                  path: relative(DOLPHIN_DIR, fullPath),
+                  path: fullPath.startsWith(DOLPHIN_DIR) ? relative(DOLPHIN_DIR, fullPath) : fullPath,
                   fullPath,
                   type: "wii",
                   gameCode,
@@ -403,13 +461,13 @@ function scanSaves(): SaveEntry[] {
   }
 
   // Scan Wii system/profile saves: shared2/sys/SYSCONF, title/00000001/*/data/*
-  const wiiSharedSys = join(DOLPHIN_DIR, "Wii", "shared2", "sys", "SYSCONF");
+  const wiiSharedSys = join(nandRoot, "shared2", "sys", "SYSCONF");
   if (existsSync(wiiSharedSys)) {
     try {
       const st = statSync(wiiSharedSys);
       saves.push({
         name: "SYSCONF (Wii System Config)",
-        path: relative(DOLPHIN_DIR, wiiSharedSys),
+        path: wiiSharedSys.startsWith(DOLPHIN_DIR) ? relative(DOLPHIN_DIR, wiiSharedSys) : wiiSharedSys,
         fullPath: wiiSharedSys,
         type: "wii",
         gameCode: "_WII_SYSTEM",
@@ -423,7 +481,7 @@ function scanSaves(): SaveEntry[] {
       });
     } catch {}
   }
-  const wiiSysDataDir = join(DOLPHIN_DIR, "Wii", "title", "00000001", "00000002", "data");
+  const wiiSysDataDir = join(nandRoot, "title", "00000001", "00000002", "data");
   if (existsSync(wiiSysDataDir)) {
     try {
       for (const file of readdirSync(wiiSysDataDir)) {
@@ -434,7 +492,7 @@ function scanSaves(): SaveEntry[] {
           if (!st.isFile()) continue;
           saves.push({
             name: file + " (Wii Profile)",
-            path: relative(DOLPHIN_DIR, fullPath),
+            path: fullPath.startsWith(DOLPHIN_DIR) ? relative(DOLPHIN_DIR, fullPath) : fullPath,
             fullPath,
             type: "wii",
             gameCode: "_WII_SYSTEM",
@@ -754,26 +812,43 @@ function writeSettings(changes: { file: string; section: string; key: string; va
 // ── Dolphin Process Management ──────────────────────────────────────────────
 
 function cleanupDolphin(): void {
+  if (cleanupScheduled) return;
+  cleanupScheduled = true;
   dolphinProc = null;
   currentRom = "";
   currentState = "idle";
-  // Disable hw forwarding when Dolphin stops (only if we enabled it — not when Global Hub is active)
-  if (hotplugMode) {
-    fetch("https://127.0.0.1:3461/api/global-hub", { tls: { rejectUnauthorized: false } })
-      .then(r => r.json())
-      .then((d: any) => {
-        if (!d.enabled) {
-          // Hub not active — we enabled forwarding ourselves, so disable it
-          fetch("https://127.0.0.1:3461/api/hw-forwarding", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ enabled: false }),
-            tls: { rejectUnauthorized: false },
-          }).catch(() => {});
-        }
-      }).catch(() => {});
-  }
-  restartKiosk();
+  const finish = () => {
+    try {
+      restartKiosk();
+    } finally {
+      cleanupScheduled = false;
+    }
+  };
+
+  // Run the expensive cleanup after the HTTP response can unwind.
+  setTimeout(() => {
+    // Disable hw forwarding when Dolphin stops (only if we enabled it — not when Global Hub is active)
+    if (hotplugMode) {
+      fetch("https://127.0.0.1:3461/api/global-hub", { tls: { rejectUnauthorized: false } })
+        .then(r => r.json())
+        .then((d: any) => {
+          if (!d.enabled) {
+            // Hub not active — we enabled forwarding ourselves, so disable it
+            return fetch("https://127.0.0.1:3461/api/hw-forwarding", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ enabled: false }),
+              tls: { rejectUnauthorized: false },
+            }).catch(() => {});
+          }
+        })
+        .catch(() => {})
+        .finally(finish);
+      return;
+    }
+
+    finish();
+  }, 0);
 }
 
 // ── Dynamic Controller Config ───────────────────────────────────────────────
@@ -897,8 +972,8 @@ function generateGCPadConfig(): void {
     const jsMatch = handlers.match(/js(\d+)/);
     if (!jsMatch) continue;
 
-    // Skip virtual/system devices
-    if (name.includes("ydotoold") || name.includes("Virtual Mouse") || name.includes("Consumer Control")) continue;
+    // Skip virtual/system devices. Virtual Pad uinput devices are handled separately.
+    if (name.includes("ydotoold") || name.includes("Virtual Mouse") || name.includes("Consumer Control") || name.startsWith("Virtual Gamepad ")) continue;
 
     const eventMatch = handlers.match(/event(\d+)/);
     if (!eventMatch) continue;
@@ -1183,6 +1258,10 @@ function generateGCPadConfig(): void {
 }
 
 async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: string }> {
+  if (cleanupScheduled) {
+    return { ok: false, error: "Dolphin is still shutting down" };
+  }
+
   if (currentState !== "idle") {
     return { ok: false, error: `Dolphin is already ${currentState === "running" ? "running a game" : "in GUI mode"}` };
   }
@@ -1203,6 +1282,7 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
   }
 
   lastError = "";
+  ensureAudioConfig();
 
   // Generate controller config
   try {
@@ -1214,10 +1294,12 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
       hubActive = hubData.enabled;
     } catch {}
 
-    if (hubActive) {
-      // Global Hub handles all controller routing — just generate Virtual Gamepad configs
+    if (hubActive || hotplugMode) {
+      // Hotplug mode and the Global Hub both route Dolphin through Virtual Gamepad slots.
       generateVirtualPadConfig();
-      console.log("[input] Global Controller Hub active — using Virtual Gamepad configs");
+      console.log(hubActive
+        ? "[input] Global Controller Hub active — using Virtual Gamepad configs"
+        : "[input] Hotplug mode enabled — using Virtual Gamepad configs");
     } else {
       // Use real hardware device names for hw controllers + Virtual Gamepads for remaining slots
       // Cage/libseat can access BT/USB controllers directly through the seat session
@@ -1240,7 +1322,12 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
 
   try {
     // Dolphin args
-    const dolphinArgs = [binary, "-u", DOLPHIN_DIR];
+    const dolphinArgs = [
+      binary,
+      "-u", DOLPHIN_DIR,
+      "-C", "Dolphin.DSP.Backend=ALSA",
+      "-C", "Dolphin.DSP.Volume=100",
+    ];
     if (romPath) dolphinArgs.push("-e", romPath);
 
     // Cage args: -s (last survivor), -d (allow VT switching)
@@ -1248,22 +1335,22 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
 
     // Environment for kiosk user (owns the DRM seat)
     const envVars: Record<string, string> = {
-      XDG_RUNTIME_DIR: "/run/user/1001",
+      XDG_RUNTIME_DIR: "/run/user/1000",
       LIBSEAT_BACKEND: "seatd",
       WLR_RENDERER: "gles2",
       WLR_NO_HARDWARE_CURSORS: "1",
       XCURSOR_SIZE: "1",
       XCURSOR_THEME: "transparent",
       XCURSOR_PATH: "/var/cache/kiosk-home/.icons",
-      HOME: "/var/cache/kiosk-home",
-      PULSE_SERVER: "/run/user/1001/pulse/native",
+      HOME: "/home/pi",
+      ALSA_CONFIG_PATH: DOLPHIN_ALSA_CONFIG,
       PATH: "/run/wrappers/bin:/run/current-system/sw/bin",
     };
     const envArgs = Object.entries(envVars).map(([k, v]) => `${k}=${v}`);
 
     // sudo -u kiosk env VAR=val cage -s -d -- dolphin-emu ...
     dolphinProc = bunSpawn({
-      cmd: [SUDO, "-u", "kiosk", ENV_BIN, ...envArgs, CAGE_BIN, ...cageArgs],
+      cmd: [ENV_BIN, ...envArgs, CAGE_BIN, ...cageArgs],
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -1325,6 +1412,10 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
 }
 
 async function stopDolphin(): Promise<{ ok: boolean; error?: string }> {
+  if (cleanupScheduled) {
+    return { ok: true };
+  }
+
   if (!dolphinProc || currentState === "idle") {
     return { ok: false, error: "Dolphin is not running" };
   }
@@ -1337,7 +1428,7 @@ async function stopDolphin(): Promise<{ ok: boolean; error?: string }> {
     // Send SIGINT to dolphin directly — it handles graceful shutdown on SIGINT
     const killed = (() => {
       try {
-        const dolphinPid = run(`pgrep -f "dolphin-emu.*-u.*/dolphin"`, 3000);
+        const dolphinPid = run(`pgrep -f "^${DOLPHIN_NOGUI} "`, 3000);
         if (dolphinPid) {
           const pids = dolphinPid.split("\n").map(p => p.trim()).filter(Boolean);
           for (const pid of pids) {
@@ -1356,29 +1447,33 @@ async function stopDolphin(): Promise<{ ok: boolean; error?: string }> {
       try { run(`${SUDO} kill ${sudoPid}`, 3000); } catch {}
     }
 
-    // Wait up to 5 seconds for graceful exit
-    const exited = await Promise.race([
-      proc.exited.then(() => true),
-      new Promise<false>((resolve) => setTimeout(() => resolve(false), 5000)),
-    ]);
-
-    if (!exited) {
-      // Force kill the whole process tree
-      console.log(`🐬 Graceful exit timed out, force killing`);
-      try { run(`${SUDO} kill -9 ${sudoPid}`, 3000); } catch {}
-      try { run(`${SUDO} pkill -9 -f "dolphin-emu.*-u.*/dolphin"`, 3000); } catch {}
-      await Promise.race([
-        proc.exited,
-        new Promise((resolve) => setTimeout(resolve, 2000)),
+    void (async () => {
+      // Wait briefly for a graceful exit, then force it in the background.
+      const exited = await Promise.race([
+        proc.exited.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 2500)),
       ]);
-    }
 
-    // State cleanup happens in the exited handler, but force it if needed
-    if (currentState !== "idle") {
+      if (!exited) {
+        console.log("🐬 Graceful exit timed out, force killing");
+        try { run(`${SUDO} kill -9 ${sudoPid}`, 3000); } catch {}
+        try { run(`${SUDO} pkill -9 -f "dolphin-emu.*-u.*/dolphin"`, 3000); } catch {}
+        await Promise.race([
+          proc.exited,
+          new Promise((resolve) => setTimeout(resolve, 1500)),
+        ]);
+      }
+
+      if (currentState !== "idle") {
+        cleanupDolphin();
+      }
+
+      lastError = "";
+    })().catch(() => {
       cleanupDolphin();
-    }
+      lastError = "";
+    });
 
-    lastError = ""; // Clear any exit code error since this was a user-initiated stop
     return { ok: true };
   } catch (e: any) {
     // Force cleanup
@@ -2279,7 +2374,7 @@ const DOLPHIN_DEFAULTS = {
   'dolphin.syncGpuOnSkipIdle': true, 'dolphin.fastmem': true,
   'dolphin.mmu': false, 'dolphin.fprf': false,
   'dolphin.audioStretching': true, 'dolphin.emulationSpeed': '1.0',
-  'dolphin.slotA': '10',
+  'dolphin.slotA': '8',
 };
 
 // Built-in profiles (not deletable)
@@ -2387,7 +2482,7 @@ async function saveSettings() {
     if (!m) return;
     let value;
     if (m.bba) {
-      value = el.checked ? '10' : '255';
+      value = el.checked ? '10' : '8';
       // Also set BBA type when enabling
       changes.push({ file: 'Dolphin.ini', section: 'Core', key: 'BBA', value: el.checked ? 'Builtin' : 'Builtin' });
     } else if (m.toggle) {
@@ -2715,9 +2810,8 @@ const server = serve({
     if (path === "/api/saves/download" && req.method === "GET") {
       const savePath = url.searchParams.get("path");
       if (!savePath) return Response.json({ error: "Missing path" }, { status: 400 });
-      const fullPath = join(DOLPHIN_DIR, savePath);
-      // Security: ensure path stays within DOLPHIN_DIR
-      if (!fullPath.startsWith(DOLPHIN_DIR) || !existsSync(fullPath)) {
+      const fullPath = resolveRequestedSavePath(savePath);
+      if (!fullPath || !existsSync(fullPath)) {
         return Response.json({ error: "File not found" }, { status: 404 });
       }
       const file = Bun.file(fullPath);
@@ -2734,16 +2828,15 @@ const server = serve({
       try {
         const body = (await req.json()) as { path: string };
         if (!body.path) return Response.json({ ok: false, error: "Missing path" }, { status: 400 });
-        const fullPath = join(DOLPHIN_DIR, body.path);
-        // Security: ensure path stays within DOLPHIN_DIR and is a save file
-        if (!fullPath.startsWith(DOLPHIN_DIR)) {
+        const fullPath = resolveRequestedSavePath(body.path);
+        if (!fullPath) {
           return Response.json({ ok: false, error: "Invalid path" }, { status: 400 });
         }
         if (!existsSync(fullPath)) {
           return Response.json({ ok: false, error: "File not found" }, { status: 404 });
         }
         // Only allow deleting save files (GCI, save states, Wii NAND saves)
-        const isInGC = fullPath.includes("/GC/");
+        const isInGC = fullPath.includes("/GC/") || fullPath.endsWith(".gci");
         const isInStates = fullPath.includes("/StateSaves/");
         const isInWii = fullPath.includes("/Wii/title/") && fullPath.includes("/data/");
         if (!isInGC && !isInStates && !isInWii) {

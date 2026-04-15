@@ -102,6 +102,15 @@ createVirtualMouse();
 function getSystemDiagnostics() {
   const read = (p: string) => { try { return readFileSync(p, "utf-8").trim(); } catch { return null; } };
   const run = (cmd: string) => { try { return execSync(cmd, { timeout: 3000 }).toString().trim(); } catch { return ""; } };
+  const readCpuSample = () => {
+    const stat = read("/proc/stat");
+    if (!stat) return null;
+    const parts = stat.split("\n")[0]?.trim().split(/\s+/).slice(1).map(Number);
+    if (!parts || parts.length < 4 || parts.some((n) => Number.isNaN(n))) return null;
+    const idle = parts[3] + (parts[4] || 0);
+    const total = parts.reduce((a, b) => a + b, 0);
+    return { idle, total };
+  };
 
   // CPU temp
   const cpuTemp = parseFloat(read("/sys/class/thermal/thermal_zone0/temp") || "0") / 1000;
@@ -112,14 +121,19 @@ function getSystemDiagnostics() {
   const gpuMatch = gpuRaw.match(/temp=([\d.]+)/);
   if (gpuMatch) gpuTemp = parseFloat(gpuMatch[1]);
 
-  // CPU usage (1s sample)
+  // CPU usage
   let cpuUsage = 0;
-  const statLines = run("head -1 /proc/stat");
-  if (statLines) {
-    const parts = statLines.split(/\s+/).slice(1).map(Number);
-    const idle = parts[3] + (parts[4] || 0);
-    const total = parts.reduce((a, b) => a + b, 0);
-    // Use /proc/loadavg for instant reading instead
+  const cpuStart = readCpuSample();
+  if (cpuStart) {
+    Bun.sleepSync(150);
+    const cpuEnd = readCpuSample();
+    if (cpuEnd && cpuEnd.total > cpuStart.total) {
+      const idleDelta = cpuEnd.idle - cpuStart.idle;
+      const totalDelta = cpuEnd.total - cpuStart.total;
+      cpuUsage = Math.max(0, Math.min(100, Math.round((1 - idleDelta / totalDelta) * 100)));
+    }
+  }
+  if (!cpuUsage) {
     const loadAvg = read("/proc/loadavg");
     if (loadAvg) {
       const cores = parseInt(run("nproc") || "4");
@@ -171,9 +185,11 @@ function getSystemDiagnostics() {
     hdmiRes = modeRaw.split("\n")[0] || "";
   }
 
-  // Audio (PipeWire)
+  // Audio
   const audioSink = run("pactl info 2>/dev/null | grep 'Default Sink'");
-  const audioName = audioSink.split(":").slice(1).join(":").trim() || null;
+  const alsaAudioName =
+    run("if [ \"$(cat /sys/class/drm/card1-HDMI-A-1/status 2>/dev/null)\" = connected ]; then echo 'HDMI Audio'; elif [ \"$(cat /sys/class/drm/card1-HDMI-A-2/status 2>/dev/null)\" = connected ]; then echo 'HDMI Audio 2'; fi");
+  const audioName = audioSink.split(":").slice(1).join(":").trim() || alsaAudioName || null;
 
   // Docker containers
   let containers: { name: string; status: string }[] = [];
@@ -335,6 +351,11 @@ const FAVOURITES_FILE = "./kiosk-favourites.json";
 const DISPLAY_CONFIG_FILE = import.meta.dir + "/display-config.json";
 const GAMEPAD_CONFIG_FILE = import.meta.dir + "/gamepad-config.json";
 const SUDO = "/run/wrappers/bin/sudo";
+const RUNNING_AS_PI = typeof process.getuid === "function" && process.getuid() === 1000;
+const PI_RUNTIME_ENV = "env XDG_RUNTIME_DIR=/run/user/1000";
+const PI_WAYLAND_ENV = `${PI_RUNTIME_ENV} WAYLAND_DISPLAY=wayland-0`;
+const AS_PI_PREFIX = RUNNING_AS_PI ? PI_RUNTIME_ENV : `${SUDO} -u pi ${PI_RUNTIME_ENV}`;
+const AS_PI_WAYLAND_PREFIX = RUNNING_AS_PI ? PI_WAYLAND_ENV : `${SUDO} -u pi ${PI_WAYLAND_ENV}`;
 
 const DEFAULT_RESOLUTION = "1280x720";
 const DEFAULT_HZ = "60";
@@ -362,7 +383,7 @@ function applyDisplayConfig(): boolean {
   const cfg = loadDisplayConfig();
   try {
     execSync(
-      `${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 /run/current-system/sw/bin/wlr-randr --output HDMI-A-1 --mode ${cfg.resolution}@${cfg.hz}Hz`,
+      `${AS_PI_WAYLAND_PREFIX} /run/current-system/sw/bin/wlr-randr --output HDMI-A-1 --mode ${cfg.resolution}@${cfg.hz}Hz`,
       { timeout: 5000 }
     );
     console.log(`[display] Applied saved resolution: ${cfg.resolution}@${cfg.hz}Hz`);
@@ -3438,7 +3459,10 @@ const server = serve({
       // Services with wantedBy=[] (on-demand only) — toggle reflects active state
       const onDemandServices = new Set(["vnc"]);
       const services = serviceNames.map(name => {
-        const active = execSync(`systemctl is-active ${name}.service 2>/dev/null || true`, { timeout: 3000 }).toString().trim() === "active";
+        let active = false;
+        try {
+          active = execSync(`systemctl is-active ${name}.service 2>/dev/null || true`, { timeout: 10000, encoding: "utf-8" }).trim() === "active";
+        } catch {}
         const runtimeDisabled = existsSync(`/run/systemd/system/${name}.service.d/disable.conf`);
         // If active but stale drop-in exists, clean it up
         if (active && runtimeDisabled) {
@@ -3518,11 +3542,35 @@ const server = serve({
     // API: audio/display settings
     const WPCTL = "/run/current-system/sw/bin/wpctl";
     const SUDO = "/run/wrappers/bin/sudo";
-    const KIOSK_ENV = { XDG_RUNTIME_DIR: "/run/user/1001" };
+    const KIOSK_ENV = { XDG_RUNTIME_DIR: "/run/user/1000" };
     const wpctl = (args: string) => {
       try {
-        return execSync(`${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 ${WPCTL} ${args}`, { timeout: 3000, encoding: "utf-8" }).trim();
+        return execSync(`${AS_PI_PREFIX} ${WPCTL} ${args}`, { timeout: 3000, encoding: "utf-8" }).trim();
       } catch { return ""; }
+    };
+    const readText = (cmd: string) => {
+      try {
+        return execSync(cmd, { timeout: 3000, encoding: "utf-8" }).trim();
+      } catch { return ""; }
+    };
+    const alsaSinks = () => {
+      const candidates = [
+        {
+          id: -1,
+          name: "alsa-vc4hdmi0",
+          description: "HDMI Audio",
+          status: "/sys/class/drm/card1-HDMI-A-1/status",
+          device: "hdmi:CARD=vc4hdmi0,DEV=0",
+        },
+        {
+          id: -2,
+          name: "alsa-vc4hdmi1",
+          description: "HDMI Audio 2",
+          status: "/sys/class/drm/card1-HDMI-A-2/status",
+          device: "hdmi:CARD=vc4hdmi1,DEV=0",
+        },
+      ];
+      return candidates.filter((sink) => readText(`cat ${sink.status} 2>/dev/null`) === "connected");
     };
 
     if (path === "/api/audio" && req.method === "GET") {
@@ -3535,7 +3583,7 @@ const server = serve({
       let sinks: { id: number; name: string; description: string; active: boolean }[] = [];
       try {
         const dumpRaw = execSync(
-          `${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 /run/current-system/sw/bin/pw-dump 2>/dev/null`,
+          `${AS_PI_PREFIX} /run/current-system/sw/bin/pw-dump 2>/dev/null`,
           { timeout: 5000, encoding: "utf-8" }
         );
         const objs = JSON.parse(dumpRaw);
@@ -3548,8 +3596,18 @@ const server = serve({
             name: o.info.props["node.name"],
             description: o.info.props["node.description"] || o.info.props["node.nick"] || o.info.props["node.name"],
             active: o.info.props["node.name"] === defaultName,
-          }));
+          }))
+          .filter((sink: any) => sink.name !== "auto_null" && sink.description !== "Dummy Output");
       } catch {}
+
+      if (sinks.length === 0) {
+        sinks = alsaSinks().map(({ id, name, description }) => ({
+          id,
+          name,
+          description,
+          active: true,
+        }));
+      }
 
       return Response.json({ volume: Math.round(volume * 100), muted, sinks });
     }
@@ -3579,17 +3637,29 @@ const server = serve({
 
     if (path === "/api/audio/sink" && req.method === "POST") {
       const body = await req.json() as { id: number };
+      if (body.id < 0) return Response.json({ ok: true });
       wpctl(`set-default ${body.id}`);
       return Response.json({ ok: true });
     }
 
     if (path === "/api/audio/test" && req.method === "POST") {
       try {
-        // Use speaker-test to play a 1-second sine tone as kiosk user via PipeWire
-        execSync(
-          `/run/current-system/sw/bin/timeout 1 ${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 /run/current-system/sw/bin/speaker-test -t sine -f 440 -l 1 2>/dev/null || true`,
-          { timeout: 5000, encoding: "utf-8" }
-        );
+        const devices = alsaSinks().map((sink) => sink.device);
+        const candidates = devices.length > 0
+          ? devices
+          : ["hdmi:CARD=vc4hdmi0,DEV=0", "hdmi:CARD=vc4hdmi1,DEV=0"];
+        let played = false;
+        for (const device of candidates) {
+          try {
+            execSync(
+              `${AS_PI_PREFIX} /run/current-system/sw/bin/speaker-test -D '${device}' -c 2 -t sine -f 440 -l 1 >/dev/null 2>&1`,
+              { timeout: 7000, encoding: "utf-8" }
+            );
+            played = true;
+            break;
+          } catch {}
+        }
+        if (!played) throw new Error("No working ALSA HDMI output found");
         return Response.json({ ok: true });
       } catch (e: any) {
         return Response.json({ ok: false, error: e.message?.slice(0, 200) }, { status: 500 });
@@ -3600,7 +3670,7 @@ const server = serve({
       const wlrRandr = () => {
         try {
           return execSync(
-            `${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 /run/current-system/sw/bin/wlr-randr`,
+            `${AS_PI_WAYLAND_PREFIX} /run/current-system/sw/bin/wlr-randr`,
             { timeout: 3000, encoding: "utf-8" }
           ).trim();
         } catch { return ""; }
@@ -3682,7 +3752,7 @@ const server = serve({
       if (args.length === 0) return Response.json({ ok: false, error: "No changes" }, { status: 400 });
       try {
         execSync(
-          `${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 /run/current-system/sw/bin/wlr-randr --output HDMI-A-1 ${args.join(" ")}`,
+          `${AS_PI_WAYLAND_PREFIX} /run/current-system/sw/bin/wlr-randr --output HDMI-A-1 ${args.join(" ")}`,
           { timeout: 5000 }
         );
         // Persist resolution (not custom-mode or transform-only changes)
@@ -3711,7 +3781,7 @@ const server = serve({
       try {
         const flag = body.on ? "--on" : "--off";
         execSync(
-          `${SUDO} -u kiosk env XDG_RUNTIME_DIR=/run/user/1001 WAYLAND_DISPLAY=wayland-0 /run/current-system/sw/bin/wlr-randr --output HDMI-A-1 ${flag}`,
+          `${AS_PI_WAYLAND_PREFIX} /run/current-system/sw/bin/wlr-randr --output HDMI-A-1 ${flag}`,
           { timeout: 5000 }
         );
         return Response.json({ ok: true });
