@@ -23,6 +23,7 @@ const SUDO = "/run/wrappers/bin/sudo";
 const CAGE_BIN = "/run/current-system/sw/bin/cage";
 const ENV_BIN = "/run/current-system/sw/bin/env";
 const DOLPHIN_ALSA_CONFIG = join(DOLPHIN_DIR, "alsa-hdmi.conf");
+const DEFAULT_GCI_FOLDER = join(DOLPHIN_DIR, "GC", "USA", "Card A", "USA");
 const ROM_EXTENSIONS = new Set([".iso", ".gcm", ".gcz", ".ciso", ".wbfs", ".rvz", ".wia", ".dol", ".elf"]);
 
 // ── Hotplug Mode ────────────────────────────────────────────────────────────
@@ -152,14 +153,20 @@ function applySnapshot(snap: Record<string, string>): void {
     "dolphin.syncGpuOnSkipIdle": { file: "Dolphin.ini", section: "Core", key: "SyncGPUOnSkipIdleHack" },
     "dolphin.audioStretching": { file: "Dolphin.ini", section: "Core", key: "AudioStretch" },
     "dolphin.emulationSpeed": { file: "Dolphin.ini", section: "Core", key: "EmulationSpeed" },
-    "dolphin.slotA": { file: "Dolphin.ini", section: "Core", key: "SlotA" },
+    "dolphin.slotA": { file: "Dolphin.ini", section: "Core", key: "SerialPort1" },
     "dolphin.bba": { file: "Dolphin.ini", section: "Core", key: "BBA" },
   };
   const changes: { file: string; section: string; key: string; value: string }[] = [];
   for (const [k, v] of Object.entries(snap)) {
     const m = mapping[k];
-    if (m) changes.push({ file: m.file, section: m.section, key: m.key, value: v });
+    if (!m) continue;
+    let value = v;
+    if (k === "dolphin.slotA") {
+      value = v === "255" || v === "8" || v === "False" ? "255" : "12";
+    }
+    changes.push({ file: m.file, section: m.section, key: m.key, value });
   }
+  changes.push({ file: "Dolphin.ini", section: "Core", key: "BBA", value: "Builtin" });
   if (changes.length > 0) writeSettings(changes);
 }
 
@@ -211,9 +218,28 @@ function ensureDirs(): void {
   const dirs = [
     join(DOLPHIN_DIR, "gamecube", "roms"),
     join(DOLPHIN_DIR, "wii", "roms"),
+    DEFAULT_GCI_FOLDER,
   ];
   for (const dir of dirs) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  }
+}
+
+function ensureGameCubeSaveSlotConfig(): void {
+  const dolphin = readIniFile("Dolphin.ini");
+  let changed = false;
+
+  if (getIniValue(dolphin, "Core", "SlotA") !== "8") {
+    setIniValue(dolphin, "Core", "SlotA", "8");
+    changed = true;
+  }
+  if (!getIniValue(dolphin, "Core", "GCIFolderAPath")) {
+    setIniValue(dolphin, "Core", "GCIFolderAPath", DEFAULT_GCI_FOLDER);
+    changed = true;
+  }
+
+  if (changed) {
+    writeIniFile("Dolphin.ini", dolphin);
   }
 }
 
@@ -253,6 +279,7 @@ ctl.!default {
 
 ensureDirs();
 ensureAudioConfig();
+ensureGameCubeSaveSlotConfig();
 
 // ── RetroAchievements (from env vars) ───────────────────────────────────────
 {
@@ -333,6 +360,25 @@ function scanRoms(): { gamecube: RomEntry[]; wii: RomEntry[] } {
     result[platform].sort((a, b) => a.displayName.localeCompare(b.displayName));
   }
   return result;
+}
+
+function resolveRequestedRomPath(platform: string, romName: string): string | null {
+  if (platform !== "gamecube" && platform !== "wii") return null;
+  if (!romName || basename(romName) !== romName) return null;
+
+  const romDir = join(DOLPHIN_DIR, platform, "roms");
+  const fullPath = join(romDir, romName);
+  if (!fullPath.startsWith(romDir + "/")) return null;
+
+  try {
+    const st = statSync(fullPath);
+    if (!st.isFile()) return null;
+  } catch {
+    return null;
+  }
+
+  if (!ROM_EXTENSIONS.has(extname(romName).toLowerCase())) return null;
+  return fullPath;
 }
 
 // ── Save File Scanner ───────────────────────────────────────────────────────
@@ -674,6 +720,7 @@ interface Settings {
     fprf: string;
     audioStretching: string;
     emulationSpeed: string;
+    slotA: string;
   };
   controllers: {
     player: number;
@@ -777,6 +824,7 @@ async function readSettings(): Promise<Settings> {
       fprf: getIniValue(dolphin, "Core", "FPRF") ?? "False",
       audioStretching: getIniValue(dolphin, "Core", "AudioStretch") ?? "False",
       emulationSpeed: getIniValue(dolphin, "Core", "EmulationSpeed") ?? "1.0",
+      slotA: getIniValue(dolphin, "Core", "SerialPort1") ?? "255",
     },
     controllers,
     hotplugMode,
@@ -793,6 +841,13 @@ function writeSettings(changes: { file: string; section: string; key: string; va
     }
     setIniValue(fileCache[change.file], change.section, change.key, change.value);
   }
+
+  const dolphinIni = fileCache["Dolphin.ini"] ?? readIniFile("Dolphin.ini");
+  setIniValue(dolphinIni, "Core", "SlotA", "8");
+  if (!getIniValue(dolphinIni, "Core", "GCIFolderAPath")) {
+    setIniValue(dolphinIni, "Core", "GCIFolderAPath", DEFAULT_GCI_FOLDER);
+  }
+  fileCache["Dolphin.ini"] = dolphinIni;
 
   for (const [filename, data] of Object.entries(fileCache)) {
     // Write via sudo tee to handle kiosk-owned files
@@ -1294,6 +1349,23 @@ async function launchDolphin(romPath?: string): Promise<{ ok: boolean; error?: s
       hubActive = hubData.enabled;
     } catch {}
 
+    if (hotplugMode && !hubActive) {
+      try {
+        const hwForwardResp = await fetch("https://127.0.0.1:3461/api/hw-forwarding", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: true }),
+          tls: { rejectUnauthorized: false },
+        });
+        const hwForwardData = await hwForwardResp.json() as { enabled?: boolean };
+        if (!hwForwardData.enabled) {
+          console.log("[input] HW forwarding request did not enable virtual gamepads");
+        }
+      } catch (e: any) {
+        console.log("[input] Failed to enable HW forwarding:", e.message);
+      }
+    }
+
     if (hubActive || hotplugMode) {
       // Hotplug mode and the Global Hub both route Dolphin through Virtual Gamepad slots.
       generateVirtualPadConfig();
@@ -1543,10 +1615,15 @@ const HTML = `<!DOCTYPE html>
   .rom-card:active { background: #222; }
   .rom-card .rom-icon { font-size: 24px; flex-shrink: 0; width: 32px; text-align: center; }
   .rom-card .rom-info { flex: 1; min-width: 0; }
-  .rom-card .rom-name { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rom-card .rom-name-row { display: flex; align-items: center; gap: 8px; min-width: 0; margin-bottom: 2px; }
+  .rom-card .rom-name { flex: 1; min-width: 0; font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rom-card .rom-name-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
   .rom-card .rom-meta { font-size: 11px; color: #666; display: flex; gap: 8px; flex-wrap: wrap; }
   .rom-card .rom-meta span { white-space: nowrap; }
   .rom-card .rom-ext { flex-shrink: 0; background: #252525; color: #888; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+  .rom-icon-btn { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; background: #151515; border: 1px solid #222; border-radius: 6px; color: #888; cursor: pointer; transition: all 0.15s; padding: 0; font-size: 12px; line-height: 1; }
+  .rom-icon-btn:hover { background: #1e1e1e; border-color: #4a9eff; color: #4a9eff; }
+  .rom-icon-btn.delete:hover { border-color: #ff4444; color: #ff4444; }
   .platform-empty { text-align: center; color: #444; padding: 16px; font-size: 13px; background: #141414; border: 1px dashed #282828; border-radius: 8px; margin-bottom: 24px; }
   .platform-empty code { color: #666; font-size: 12px; }
 
@@ -1889,7 +1966,13 @@ function renderModalContent(platform) {
       const lastPlayedStr = rom.lastPlayed ? timeAgo(rom.lastPlayed) : '';
       html += '<div class="rom-card" onclick="launchRom(\\'' + escHtml(rom.platform) + '\\',\\'' + escHtml(rom.filename).replace(/'/g, "\\\\'") + '\\')">' +
         '<div class="rom-icon">' + icon + '</div>' +
-        '<div class="rom-info"><div class="rom-name">' + escHtml(rom.displayName) + '</div>' +
+        '<div class="rom-info"><div class="rom-name-row">' +
+          '<div class="rom-name">' + escHtml(rom.displayName) + '</div>' +
+          '<div class="rom-name-actions">' +
+            '<button class="rom-icon-btn" onclick="event.stopPropagation();downloadRom(\\'' + escHtml(rom.platform) + '\\',\\'' + escHtml(rom.filename).replace(/'/g, "\\\\'") + '\\')" title="Download ROM: ' + escHtml(rom.filename) + '">⬇</button>' +
+            '<button class="rom-icon-btn delete" onclick="event.stopPropagation();deleteRom(\\'' + escHtml(rom.platform) + '\\',\\'' + escHtml(rom.filename).replace(/'/g, "\\\\'") + '\\')" title="Delete ROM: ' + escHtml(rom.filename) + '">✕</button>' +
+          '</div>' +
+        '</div>' +
         '<div class="rom-meta"><span>' + escHtml(rom.sizeFormatted) + '</span><span>' + escHtml(rom.mtimeFormatted) + '</span>' +
         (lastPlayedStr ? '<span style="color:#4a9eff">▶ ' + lastPlayedStr + '</span>' : '') +
         '</div>';
@@ -1961,6 +2044,28 @@ async function refreshRoms() {
   showToast('Scanning ROMs...');
   await loadRoms();
   showToast('ROMs refreshed');
+}
+
+function downloadRom(platform, rom) {
+  window.open('/api/roms/download?platform=' + encodeURIComponent(platform) + '&rom=' + encodeURIComponent(rom), '_blank');
+}
+
+async function deleteRom(platform, rom) {
+  const ok = window.gamepadConfirm ? await window.gamepadConfirm('Delete ROM?\\n\\n' + rom) : confirm('Delete ROM?'); if (!ok) return;
+  try {
+    const resp = await fetch('/api/roms/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform, rom }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      showToast('Deleted: ' + rom);
+      loadRoms();
+    } else {
+      showToast(data.error || 'Delete failed', 'error');
+    }
+  } catch { showToast('Request failed', 'error'); }
 }
 
 function downloadSave(path) {
@@ -2306,7 +2411,7 @@ function renderSettings() {
   html += settingSlider('Speed Limit', 'dolphin.emulationSpeed', parseFloat(s.dolphin.emulationSpeed) || 1.0, 0.0, 2.0, 0.1);
 
   html += '<div style="font-size:11px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;margin-top:16px">🌐 Network</div>';
-  html += settingToggle('Broadband Adapter (LAN)', 'dolphin.slotA', s.dolphin.slotA === '10', 'Enable BBA in Slot A for LAN multiplayer (MKDD, Kirby Air Ride, etc.)');
+  html += settingToggle('Broadband Adapter (LAN)', 'dolphin.slotA', s.dolphin.slotA !== '255', 'Enable BBA on Serial Port 1 for LAN multiplayer. GameCube save files remain in Slot A.');
 
   $('settingsForm').innerHTML = html;
 
@@ -2374,7 +2479,7 @@ const DOLPHIN_DEFAULTS = {
   'dolphin.syncGpuOnSkipIdle': true, 'dolphin.fastmem': true,
   'dolphin.mmu': false, 'dolphin.fprf': false,
   'dolphin.audioStretching': true, 'dolphin.emulationSpeed': '1.0',
-  'dolphin.slotA': '8',
+  'dolphin.slotA': '255',
 };
 
 // Built-in profiles (not deletable)
@@ -2473,7 +2578,7 @@ async function saveSettings() {
     'dolphin.fprf': { file: 'Dolphin.ini', section: 'Core', key: 'FPRF', toggle: true },
     'dolphin.audioStretching': { file: 'Dolphin.ini', section: 'Core', key: 'AudioStretch', toggle: true },
     'dolphin.emulationSpeed': { file: 'Dolphin.ini', section: 'Core', key: 'EmulationSpeed', slider: true },
-    'dolphin.slotA': { file: 'Dolphin.ini', section: 'Core', key: 'SlotA', bba: true },
+    'dolphin.slotA': { file: 'Dolphin.ini', section: 'Core', key: 'SerialPort1', bba: true },
   };
 
   document.querySelectorAll('[data-key]').forEach(el => {
@@ -2482,9 +2587,9 @@ async function saveSettings() {
     if (!m) return;
     let value;
     if (m.bba) {
-      value = el.checked ? '10' : '8';
-      // Also set BBA type when enabling
-      changes.push({ file: 'Dolphin.ini', section: 'Core', key: 'BBA', value: el.checked ? 'Builtin' : 'Builtin' });
+      value = el.checked ? '12' : '255';
+      changes.push({ file: 'Dolphin.ini', section: 'Core', key: 'BBA', value: 'Builtin' });
+      changes.push({ file: 'Dolphin.ini', section: 'Core', key: 'SlotA', value: '8' });
     } else if (m.toggle) {
       value = el.checked ? 'True' : 'False';
     } else if (m.slider) {
@@ -2728,6 +2833,41 @@ const server = serve({
         }
         const result = await launchDolphin(romPath);
         return Response.json(result, { status: result.ok ? 200 : 500 });
+      } catch (e: any) {
+        return Response.json({ ok: false, error: e.message }, { status: 500 });
+      }
+    }
+
+    // API: Download ROM file
+    if (path === "/api/roms/download" && req.method === "GET") {
+      const platform = url.searchParams.get("platform") || "";
+      const rom = url.searchParams.get("rom") || "";
+      const fullPath = resolveRequestedRomPath(platform, rom);
+      if (!fullPath) {
+        return Response.json({ error: "ROM not found" }, { status: 404 });
+      }
+      const file = Bun.file(fullPath);
+      return new Response(file, {
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Disposition": `attachment; filename="${basename(fullPath)}"`,
+        },
+      });
+    }
+
+    // API: Delete ROM file
+    if (path === "/api/roms/delete" && req.method === "POST") {
+      try {
+        const body = (await req.json()) as { platform: string; rom: string };
+        const fullPath = resolveRequestedRomPath(body.platform, body.rom);
+        if (!fullPath) {
+          return Response.json({ ok: false, error: "ROM not found" }, { status: 404 });
+        }
+        if (currentState !== "idle" && currentRom === body.rom) {
+          return Response.json({ ok: false, error: "Cannot delete the ROM while it is running" }, { status: 400 });
+        }
+        unlinkSync(fullPath);
+        return Response.json({ ok: true });
       } catch (e: any) {
         return Response.json({ ok: false, error: e.message }, { status: 500 });
       }

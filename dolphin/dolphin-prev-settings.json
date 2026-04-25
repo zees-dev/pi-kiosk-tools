@@ -1,13 +1,13 @@
 {
-  "gfx.efbScale": "1",
-  "gfx.msaa": "0x00000000",
+  "gfx.efbScale": "4",
+  "gfx.msaa": "0x00000002",
   "gfx.showFps": "True",
-  "gfx.maxAnisotropy": "0",
+  "gfx.maxAnisotropy": "4",
   "gfx.vsync": "False",
   "gfx.shaderCompilationMode": "0",
-  "gfx.waitForShaders": "False",
+  "gfx.waitForShaders": "True",
   "gfx.fastDepthCalc": "True",
-  "gfx.enablePixelLighting": "False",
+  "gfx.enablePixelLighting": "True",
   "gfx.backendMultithreading": "True",
   "gfx.efbAccessEnable": "False",
   "gfx.efbAccessDeferInvalidation": "False",
@@ -15,8 +15,8 @@
   "dolphin.gfxBackend": "Vulkan",
   "dolphin.cpuCore": "1",
   "dolphin.fullscreen": "True",
-  "dolphin.overclockEnable": "True",
-  "dolphin.overclock": "2.0",
+  "dolphin.overclockEnable": "False",
+  "dolphin.overclock": "1.0",
   "dolphin.dspHle": "True",
   "dolphin.cpuThread": "True",
   "dolphin.skipIdle": "True",
@@ -26,5 +26,6 @@
   "dolphin.mmu": "False",
   "dolphin.fprf": "False",
   "dolphin.audioStretching": "True",
-  "dolphin.emulationSpeed": "1.0"
+  "dolphin.emulationSpeed": "1.0",
+  "dolphin.slotA": "12"
 }

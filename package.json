@@ -1,6 +1,10 @@
 {
   "name": "pi-kiosk-tools",
   "type": "module",
+  "scripts": {
+    "file-drop": "bun run file-drop/file-drop.ts",
+    "test:file-drop": "bun test file-drop/file-drop.test.ts"
+  },
   "dependencies": {
     "dbus-next": "^0.10.2"
   }

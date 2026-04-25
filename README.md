@@ -13,6 +13,7 @@ Utility services for a Raspberry Pi 5 retro gaming kiosk running NixOS. Each ser
 | **Dolphin Manager** | 3460 | `dolphin/` | Dolphin Emulator launcher — ROM browser, save management, dynamic controller mapping, performance profiles |
 | **Virtual Pad** | 3461 (HTTPS) | `virtual-pad/` | Web-based gamepad — phone touchscreen → WebSocket → uinput evdev device. Supports up to 4 players |
 | **SpaghettiKart** | 3462 | `spaghetti-kart/` | Mario Kart 64 PC port launcher — start/stop game, configure settings, view controllers |
+| **File Drop** | 3463 | `file-drop/` | Upload files or fetch them from pasted download URLs into a local gitignored downloads directory |
 
 ## Additional
 

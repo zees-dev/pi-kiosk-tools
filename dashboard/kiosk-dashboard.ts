@@ -202,7 +202,7 @@ function getSystemDiagnostics() {
   }
 
   // Services health
-  const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "virtual-pad", "vnc", "kiosk-dashboard"];
+  const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "virtual-pad", "file-drop", "vnc", "kiosk-dashboard"];
   const services = serviceNames.map(name => {
     const active = run(`systemctl is-active ${name}.service 2>/dev/null`) === "active";
     const runtimeDisabled = existsSync(`/run/systemd/system/${name}.service.d/disable.conf`);
@@ -568,6 +568,7 @@ function getApps(): App[] {
   apps.push(
     // Apps
     { id: "virtualpad", name: "Virtual Pad", icon: "🎮", url: `https://${ip}:3461/view`, description: "Web-based game controller", diagnosticsUrl: `/api/virtualpad-controllers`, section: "apps" },
+    { id: "filedrop", name: "File Drop", icon: "📥", url: `http://${ip}:3463`, description: "Upload files or fetch them from URLs", section: "apps" },
     { id: "wifi", name: "WiFi Manager", icon: "📶", url: `http://${ip}:3457`, description: "Network settings", diagnosticsUrl: `http://${ip}:3457/api/diagnostics`, section: "apps" },
     { id: "bluetooth", name: "Bluetooth", icon: "🔵", url: `http://${ip}:3456`, description: "Controller pairing", diagnosticsUrl: `http://${ip}:3456/api/diagnostics`, section: "apps" },
     { id: "vnc", name: "VNC", icon: "📺", url: `http://${ip}:6080/vnc.html?host=${ip}&port=6080&autoconnect=true&resize=scale&quality=6&show_dot=true&view_clip=true`, description: "View kiosk display remotely", external: true, section: "apps" },
@@ -3455,7 +3456,7 @@ const server = serve({
 
     // API: service control
     if (path === "/api/services" && req.method === "GET") {
-      const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "virtual-pad", "vnc", "kiosk-dashboard", "openclaw"];
+      const serviceNames = ["kiosk", "retrobox", "bluetooth-manager", "wifi-manager", "remote-pad", "dolphin-manager", "virtual-pad", "file-drop", "vnc", "kiosk-dashboard", "openclaw"];
       // Services with wantedBy=[] (on-demand only) — toggle reflects active state
       const onDemandServices = new Set(["vnc"]);
       const services = serviceNames.map(name => {

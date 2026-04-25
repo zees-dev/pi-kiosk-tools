@@ -16,20 +16,20 @@
     "playCount": 1
   },
   "mario-kart-double-dash-extended.iso": {
-    "lastPlayed": 1776222562691,
-    "playCount": 92
+    "lastPlayed": 1776505642297,
+    "playCount": 99
   },
   "bomberman-generation-usa.rvz": {
-    "lastPlayed": 1775822105888,
-    "playCount": 10
+    "lastPlayed": 1776499811868,
+    "playCount": 11
   },
   "super-smash-bros-melee-usa.rvz": {
-    "lastPlayed": 1775216590520,
-    "playCount": 4
+    "lastPlayed": 1776501103653,
+    "playCount": 5
   },
   "super-mario-strikers-usa.rvz": {
-    "lastPlayed": 1775218544715,
-    "playCount": 4
+    "lastPlayed": 1776499741307,
+    "playCount": 5
   },
   "f-zero-gx-usa.rvz": {
     "lastPlayed": 1774065525805,
@@ -42,5 +42,9 @@
   "luigis-mansion-usa.rvz": {
     "lastPlayed": 1776222432042,
     "playCount": 5
+  },
+  "mario-kart-double-dash-rtgp-v2.1.iso": {
+    "lastPlayed": 1777093478648,
+    "playCount": 7
   }
 }
